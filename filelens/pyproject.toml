@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "filelens"
+version = "0.1.0"
+description = "Intelligent file reading for AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "tree-sitter>=0.22",
+    "tree-sitter-python>=0.21",
+    "tree-sitter-javascript>=0.21",
+    "tree-sitter-typescript>=0.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
