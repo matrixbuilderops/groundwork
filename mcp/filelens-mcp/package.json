@@ -1,7 +1,7 @@
 {
   "name": "filelens-mcp",
   "version": "0.1.0",
-  "description": "MCP server — intelligent file reading for AI agents with direct tool access",
+  "description": "MCP server — intelligent file reading for AI agents. Collapses outline→search→chunk into single tool calls.",
   "type": "module",
   "scripts": {
     "build": "tsc && chmod 755 build/index.js"
@@ -10,6 +10,15 @@
     "filelens-mcp": "./build/index.js"
   },
   "files": ["build"],
+  "keywords": ["mcp", "ai", "file-reading", "llm", "agent", "tools", "filelens"],
+  "author": "matrixbuilderops",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matrixbuilderops/groundwork.git",
+    "directory": "mcp/filelens-mcp"
+  },
+  "homepage": "https://github.com/matrixbuilderops/groundwork/tree/main/mcp/filelens-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.23.0"
@@ -17,5 +26,8 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

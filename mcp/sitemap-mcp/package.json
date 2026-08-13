@@ -1,7 +1,7 @@
 {
   "name": "sitemap-mcp",
   "version": "0.1.0",
-  "description": "MCP server — website awareness for AI agents with direct tool access",
+  "description": "MCP server — website awareness for AI agents. Fetch, search, and map sites without raw HTML noise.",
   "type": "module",
   "scripts": {
     "build": "tsc && chmod 755 build/index.js"
@@ -10,6 +10,15 @@
     "sitemap-mcp": "./build/index.js"
   },
   "files": ["build"],
+  "keywords": ["mcp", "ai", "web", "crawler", "sitemap", "llm", "agent", "tools"],
+  "author": "matrixbuilderops",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matrixbuilderops/groundwork.git",
+    "directory": "mcp/sitemap-mcp"
+  },
+  "homepage": "https://github.com/matrixbuilderops/groundwork/tree/main/mcp/sitemap-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.23.0"
@@ -17,5 +26,8 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
