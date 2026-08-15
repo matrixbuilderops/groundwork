@@ -16,41 +16,314 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 
-const server = new McpServer({ name: "sitemap", version: "0.1.0" });
+const server = new McpServer({ name: "sitemap", version: "0.2.0" });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Destination policy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Hosts that are normally blocked but may be allowed explicitly, e.g. for
+ * local fixtures: SITEMAP_ALLOW_PRIVATE="1" (blanket) or a comma-separated
+ * list of "host" / "host:port" entries. Default is empty — nothing private
+ * is reachable.
+ */
+const ALLOW_PRIVATE_RAW = (process.env.SITEMAP_ALLOW_PRIVATE ?? "").trim();
+const ALLOW_PRIVATE_ALL = ALLOW_PRIVATE_RAW === "1" || ALLOW_PRIVATE_RAW.toLowerCase() === "all";
+const ALLOW_PRIVATE_HOSTS = new Set(
+  ALLOW_PRIVATE_ALL ? [] : ALLOW_PRIVATE_RAW.split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+);
+
+/**
+ * Which reserved-range rule an address falls under, or null if it is public.
+ * Names are returned (not a boolean) so the error can say *why* it was blocked.
+ */
+function reservedRule(addr: string): string | null {
+  const fam = isIP(addr);
+  if (fam === 4) {
+    const o = addr.split(".").map(Number);
+    if (o[0] === 0) return "0.0.0.0/8 (this network)";
+    if (o[0] === 10) return "10.0.0.0/8 (private)";
+    if (o[0] === 127) return "127.0.0.0/8 (loopback)";
+    if (o[0] === 169 && o[1] === 254) return "169.254.0.0/16 (link-local — cloud instance metadata)";
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return "172.16.0.0/12 (private)";
+    if (o[0] === 192 && o[1] === 168) return "192.168.0.0/16 (private)";
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return "100.64.0.0/10 (carrier NAT)";
+    if (o[0] >= 224) return "224.0.0.0/4+ (multicast/reserved)";
+    return null;
+  }
+  if (fam === 6) {
+    const a = addr.toLowerCase();
+    // ::ffff:127.0.0.1 and friends carry an embedded v4 address.
+    const mapped = a.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return reservedRule(mapped[1]);
+    if (a === "::" || a === "::1") return "::/128, ::1/128 (unspecified/loopback)";
+    const head = parseInt(a.split(":")[0] || "0", 16);
+    if ((head & 0xfe00) === 0xfc00) return "fc00::/7 (unique local)";
+    if ((head & 0xffc0) === 0xfe80) return "fe80::/10 (link-local)";
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Gate one hop. Throws with the host and the rule that blocked it, so a
+ * blocked destination never looks like an empty page.
+ */
+async function assertAllowedUrl(u: URL): Promise<void> {
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`Blocked scheme "${u.protocol}" — sitemap only fetches http:// and https:// (data:, file: and friends are refused).`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (ALLOW_PRIVATE_ALL) return;
+  if (ALLOW_PRIVATE_HOSTS.has(host) || ALLOW_PRIVATE_HOSTS.has(u.host.toLowerCase())) return;
+
+  let addrs: string[];
+  if (isIP(host)) {
+    // WHATWG URL already normalises 2130706433 and 0x7f000001 to 127.0.0.1,
+    // so the numeric-encoding bypasses land here as plain dotted quads.
+    addrs = [host];
+  } else {
+    try {
+      addrs = (await lookup(host, { all: true })).map(a => a.address);
+    } catch (e) {
+      throw new Error(`Cannot resolve host "${host}": ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  for (const a of addrs) {
+    const rule = reservedRule(a);
+    if (rule) {
+      throw new Error(
+        `Blocked host "${u.host}" — resolves to ${a}, in ${rule}. ` +
+        `Set SITEMAP_ALLOW_PRIVATE=${u.host} (or =1 for all) to permit it deliberately.`
+      );
+    }
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function fetchHTML(url: string, timeoutMs = 10000): Promise<string> {
+/** 5 MiB. Measured: a 200 MiB body drove RSS 44 → 692 MiB through res.text() alone. */
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+/** undici's own default is 20 hops; 5 is enough for trailing-slash and www redirects. */
+const MAX_REDIRECTS = 5;
+/** Per-match ceiling in site_search_page. 800 chars is ~2 paragraphs of prose. */
+const MAX_MATCH_CHARS = 800;
+
+/** Read a body with a running byte counter, aborting past MAX_BODY_BYTES. */
+async function readCapped(res: Response, url: string): Promise<string> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    throw new Error(`Response too large: ${url} declares content-length ${declared} B, cap is ${MAX_BODY_BYTES} B (5 MiB).`);
+  }
+  if (!res.body) return "";
+  const decoder = new TextDecoder("utf-8");
+  let out = "";
+  let seen = 0;
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    seen += chunk.byteLength;
+    if (seen > MAX_BODY_BYTES) {
+      throw new Error(`Response too large: ${url} exceeded the ${MAX_BODY_BYTES} B (5 MiB) cap after ${seen} B — stream aborted, body discarded.`);
+    }
+    out += decoder.decode(chunk, { stream: true });
+  }
+  return out + decoder.decode();
+}
+
+/**
+ * Fetch one page. Redirects are followed by hand so every hop is gated by
+ * assertAllowedUrl, and the URL that actually served the body is returned —
+ * relative links and the reported provenance both resolve against it.
+ */
+async function fetchHTML(url: string, timeoutMs = 10000): Promise<{ html: string; finalUrl: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; groundwork-sitemap/1.0)" },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    return await res.text();
+    let current = new URL(url);
+    for (let hop = 0; ; hop++) {
+      await assertAllowedUrl(current);
+      const res = await fetch(current, {
+        signal: controller.signal,
+        redirect: "manual",
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; groundwork-sitemap/1.0)" },
+      });
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (location) {
+        await res.body?.cancel().catch(() => {});
+        if (hop >= MAX_REDIRECTS) {
+          throw new Error(`Too many redirects (>${MAX_REDIRECTS}) starting at ${url}; stopped at ${current.href}`);
+        }
+        let next: URL;
+        try {
+          next = new URL(location, current);
+        } catch {
+          throw new Error(`HTTP ${res.status} from ${current.href} with unparseable Location: ${location}`);
+        }
+        current = next;
+        continue;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      // redirect:"manual" leaves res.url as the request URL, so track it ourselves.
+      return { html: await readCapped(res, current.href), finalUrl: current.href };
+    }
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Strip HTML tags and collapse whitespace into readable plain text */
-function htmlToText(html: string): string {
+/** HTML elements with no closing tag — they can never open a chrome block. */
+const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input",
+  "link", "meta", "param", "source", "track", "wbr"]);
+
+/** Elements that are chrome by tag name alone. */
+const CHROME_TAGS = new Set(["script", "style", "noscript", "template", "svg",
+  "nav", "header", "footer", "aside"]);
+
+/**
+ * Class/id words that mark a container as chrome. Matched as whole
+ * hyphen/underscore/space-delimited tokens — a substring test would strip
+ * <div class="protocol"> because "protocol" contains "toc".
+ */
+const CHROME_WORDS = new Set(["nav", "navbar", "navigation", "sidebar", "sidenav",
+  "toc", "menu", "breadcrumb", "breadcrumbs", "header", "footer", "masthead", "topbar"]);
+
+/** Whole class names that are chrome regardless of tag. */
+const CHROME_CLASS_RE = /\b(back-to-top|skip-to-content|skip-link|screen-reader[\w-]*|sr-only|visually-hidden)\b/i;
+
+function attrValue(attrs: string, name: string): string {
+  const m = attrs.match(new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, "i"));
+  return m ? (m[2] ?? m[3] ?? m[4] ?? "") : "";
+}
+
+/**
+ * Content elements never classify as chrome by class/id, whatever they are
+ * called. Measured: www.iana.org/help/example-domains wraps the whole page in
+ * <article class="hemmed sidenav">, where "sidenav" is a layout modifier —
+ * matching it dropped 100% of the body text.
+ */
+const NEVER_BY_CLASS = new Set(["article", "main", "body", "html"]);
+
+function isChrome(tag: string, attrs: string): boolean {
+  if (CHROME_TAGS.has(tag)) return true;
+  if (NEVER_BY_CLASS.has(tag)) return false;
+  if (/\brole\s*=\s*["']?(navigation|banner|contentinfo|search|complementary)\b/i.test(attrs)) return true;
+  if (/\baria-hidden\s*=\s*["']?true\b/i.test(attrs)) return true;
+  const ident = `${attrValue(attrs, "class")} ${attrValue(attrs, "id")}`;
+  if (CHROME_CLASS_RE.test(ident)) return true;
+  return ident.toLowerCase().split(/[\s_\-]+/).some(w => CHROME_WORDS.has(w));
+}
+
+/**
+ * Remove chrome elements including everything nested inside them.
+ *
+ * The old implementation used /<nav[\s\S]*?<\/nav>/gi, which stops at the
+ * FIRST </nav>: on <nav><nav>INNER</nav>OUTER_LEAK</nav> it kept OUTER_LEAK.
+ * This walks tags with a depth counter instead. An element that never closes
+ * is left in place and named in `unclosed` rather than swallowing the tail.
+ */
+function stripChrome(html: string): { html: string; removed: number; unclosed: string[]; kept: number } {
+  const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>])*)>/g;
+  const cuts: Array<[number, number]> = [];
+  const unclosed: string[] = [];
+  let kept = 0;
+  let drop: { tag: string; start: number; depth: number } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    const closing = m[1] === "/";
+    const tag = m[2].toLowerCase();
+    const attrs = m[3];
+    const selfClosing = VOID_TAGS.has(tag) || /\/\s*$/.test(attrs);
+    if (drop) {
+      if (tag !== drop.tag) continue;
+      if (closing) {
+        if (--drop.depth === 0) {
+          // Never let a chrome wrapper swallow the document's main content.
+          const slice = html.slice(drop.start, tagRe.lastIndex);
+          if (/<(main|article)\b/i.test(slice)) kept++;
+          else cuts.push([drop.start, tagRe.lastIndex]);
+          drop = null;
+        }
+      } else if (!selfClosing) {
+        drop.depth++;
+      }
+      continue;
+    }
+    if (closing || selfClosing) continue;
+    if (isChrome(tag, attrs)) drop = { tag, start: m.index, depth: 1 };
+  }
+  if (drop) unclosed.push(drop.tag);
+
+  let out = "";
+  let cursor = 0;
+  for (const [a, b] of cuts) {
+    out += html.slice(cursor, a);
+    cursor = b;
+  }
+  out += html.slice(cursor);
+  return { html: out, removed: cuts.length, unclosed, kept };
+}
+
+/**
+ * Strip HTML tags and collapse whitespace into readable plain text, plus a
+ * note when a chrome element could not be closed — its content is still in
+ * the output, and silently returning it would look identical to a clean page.
+ */
+function tagsToText(html: string): string {
   return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-    .replace(/<header[\s\S]*?<\/header>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<[^>]+>/g, " ")
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
     .replace(/\s{3,}/g, "\n\n")
     .trim();
+}
+
+function htmlToTextNoted(html: string): { text: string; note: string } {
+  const stripped = stripChrome(html);
+  const text = tagsToText(stripped.html);
+  const note = stripped.unclosed.length
+    ? `NOTE: <${stripped.unclosed.join(">, <")}> is never closed in the source — its navigation text was NOT stripped and appears below.\n`
+    : "";
+  return { text, note };
+}
+
+/** Strip HTML tags and collapse whitespace into readable plain text */
+function htmlToText(html: string): string {
+  return htmlToTextNoted(html).text;
+}
+
+/**
+ * Fit header+body into `budget` characters *including* the truncation notice.
+ * The old slice bounded the body only, so a budget of 8000 returned 8116 and
+ * a budget of 1200 returned 1327. The notice length depends on the numbers it
+ * prints, so the keep length is solved by fixed point (converges in <= 2 passes).
+ */
+function fitToBudget(header: string, text: string, budget: number): string {
+  const note = (shown: number) => `\n\n[... truncated: ${shown} of ${text.length} chars shown. Use maxChars to increase.]`;
+  if (header.length + text.length <= budget) return header + text;
+  let keep = Math.max(0, budget - header.length);
+  for (let i = 0; i < 4; i++) {
+    const next = Math.max(0, budget - header.length - note(Math.min(keep, text.length)).length);
+    if (next === keep) break;
+    keep = next;
+  }
+  // Floor: the header always ships, even at an unusably small budget — dropping
+  // the provenance line to satisfy maxChars would be the worse answer.
+  return header + text.slice(0, keep) + note(keep);
+}
+
+/**
+ * True when the body came from somewhere other than the URL asked for.
+ * Compares normalised hrefs, so "https://example.com" -> "https://example.com/"
+ * (WHATWG normalisation, not a redirect) does not print a REQUESTED line.
+ */
+function redirected(requested: string, finalUrl: string): boolean {
+  try { return new URL(requested).href !== finalUrl; } catch { return true; }
 }
 
 /** Extract page title */
@@ -69,8 +342,9 @@ function extractLinks(html: string, baseUrl: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
     try {
-      const abs = new URL(m[1], baseUrl).href;
-      if (abs.startsWith(origin)) links.add(abs);
+      const abs = new URL(m[1], baseUrl);
+      // startsWith let https://example.com match https://example.com.cdn.net.
+      if (abs.origin === origin) links.add(abs.href);
     } catch { /* skip malformed */ }
   }
   return [...links];
@@ -87,10 +361,17 @@ function extractForms(html: string, pageUrl: string): Array<{ page: string; fiel
     const action = (attrs.match(/action=["']([^"']+)["']/i)?.[1] ?? pageUrl);
     const method = (attrs.match(/method=["']([^"']+)["']/i)?.[1] ?? "GET").toUpperCase();
     const fields: string[] = [];
-    const inputRe = /(?:name|id|placeholder)=["']([^"']+)["']/gi;
+    // One identifier per control, not every name|id|placeholder anywhere in the
+    // form body — that reported a <label>'s id, a <div>'s id, and the same
+    // input twice (once by name, once by placeholder). The Python twin
+    // (parser.py:20-23) already iterated controls; this matches it.
+    const controlRe = /<(input|select|textarea)\b((?:"[^"]*"|'[^']*'|[^>])*)>/gi;
     let im: RegExpExecArray | null;
-    while ((im = inputRe.exec(body)) !== null) {
-      if (!fields.includes(im[1])) fields.push(im[1]);
+    while ((im = controlRe.exec(body)) !== null) {
+      const cattrs = im[2];
+      if (/\btype\s*=\s*["']?hidden\b/i.test(cattrs)) continue;
+      const name = attrValue(cattrs, "name") || attrValue(cattrs, "id");
+      if (name && !fields.includes(name)) fields.push(name);
     }
     if (fields.length > 0) forms.push({ page: pageUrl, fields, action: `${method} ${action}`, method });
   }
@@ -126,17 +407,19 @@ server.registerTool(
     description: "Fetch a URL and return clean readable text — no HTML tags, no scripts, no navbars. Strips all noise and returns just the content. Use instead of curl+grep when you want readable page content in one call.",
     inputSchema: z.object({
       url: z.string().url().describe("The URL to fetch"),
-      maxChars: z.number().optional().default(8000).describe("Max characters to return (default 8000). Use to stay within context limits."),
+      maxChars: z.number().int().positive().optional().default(8000).describe("Max characters in the whole response, header included (default 8000). Use to stay within context limits."),
     }),
   },
   async ({ url, maxChars }) => {
     try {
-      const html = await fetchHTML(url);
+      const { html, finalUrl } = await fetchHTML(url);
       const title = extractTitle(html);
-      const text = htmlToText(html);
-      const trimmed = text.slice(0, maxChars ?? 8000);
-      const truncated = text.length > (maxChars ?? 8000) ? `\n\n[... truncated at ${maxChars} chars. Use maxChars to increase.]` : "";
-      return { content: [{ type: "text" as const, text: `URL: ${url}\nTITLE: ${title}\n\n${trimmed}${truncated}` }] };
+      const { text, note } = htmlToTextNoted(html);
+      const budget = maxChars ?? 8000;
+      // URL: line reports what served the body, not what was asked for — a
+      // 302 used to stamp the redirect target's content with the caller's URL.
+      const header = `URL: ${finalUrl}${redirected(url, finalUrl) ? `\nREQUESTED: ${url}` : ""}\nTITLE: ${title}\n${note}\n`;
+      return { content: [{ type: "text" as const, text: fitToBudget(header, text, budget) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: `Error fetching ${url}: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
     }
@@ -158,15 +441,21 @@ server.registerTool(
   },
   async ({ url }) => {
     try {
-      const html = await fetchHTML(url);
+      const { html, finalUrl } = await fetchHTML(url);
       const title = extractTitle(html);
-      const links = extractLinks(html, url);
-      const forms = extractForms(html, url);
+      // Resolve against the URL that served the body: /docs → /docs/ used to
+      // yield /intro (404) instead of /docs/intro (200).
+      const links = extractLinks(html, finalUrl);
+      const forms = extractForms(html, finalUrl);
       const apiHints = extractApiHints(html);
-      const authRequired = requiresAuth(htmlToText(html));
+      // Run the auth heuristic on the UNstripped text: the "Sign in" link
+      // usually lives in exactly the header/nav that htmlToText now removes,
+      // so feeding it the cleaned text would turn true into false.
+      const authRequired = requiresAuth(tagsToText(html));
 
       const parts = [
-        `SITE: ${url}`,
+        `SITE: ${finalUrl}`,
+        ...(redirected(url, finalUrl) ? [`REQUESTED: ${url}`] : []),
         `TITLE: ${title}`,
         `AUTH REQUIRED: ${authRequired}`,
         "",
@@ -201,38 +490,56 @@ server.registerTool(
     inputSchema: z.object({
       url: z.string().url().describe("The URL to fetch and search"),
       query: z.string().describe("The term or phrase to search for"),
-      contextSentences: z.number().optional().default(3).describe("Sentences of context around each match (default 3)"),
+      contextSentences: z.number().int().nonnegative().optional().default(1).describe("Sentences of context around each match (default 1)"),
     }),
   },
   async ({ url, query, contextSentences }) => {
     try {
-      const html = await fetchHTML(url);
+      const { html, finalUrl } = await fetchHTML(url);
       const title = extractTitle(html);
       const text = htmlToText(html);
 
-      // Split into sentences, find matches with context
-      const sentences = text.split(/(?<=[.!?])\s+/);
-      const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      const ctx = contextSentences ?? 3;
+      // Split on block boundaries FIRST. Sentence-splitting alone made one
+      // 2,359-char navigation blob a single "sentence" holding 5 of 6 hits,
+      // which is how this tool returned 165% of the page it was meant to
+      // be a cheaper alternative to. htmlToText emits \n\n at block edges.
+      const units = text.split(/\n{2,}/)
+        .flatMap(b => b.split(/(?<=[.!?])\s+/))
+        .filter(s => s.trim().length > 0);
+      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(escaped, "i");
+      const ctx = contextSentences ?? 1;
 
+      // Report occurrences as well as blocks: 2 blocks used to be the whole
+      // answer for a page containing the term 6 times, with no sign of the gap.
+      const occurrences = (text.match(new RegExp(escaped, "gi")) ?? []).length;
       const matches: string[] = [];
-      for (let i = 0; i < sentences.length; i++) {
-        if (pattern.test(sentences[i])) {
+      let capped = 0;
+      for (let i = 0; i < units.length; i++) {
+        if (pattern.test(units[i])) {
           const start = Math.max(0, i - ctx);
-          const end = Math.min(sentences.length, i + ctx + 1);
-          const block = sentences.slice(start, end).join(" ");
+          const end = Math.min(units.length, i + ctx + 1);
+          let block = units.slice(start, end).join(" ");
+          if (block.length > MAX_MATCH_CHARS) {
+            // Keep the window centred on the hit rather than truncating at 0.
+            const at = block.search(pattern);
+            const from = Math.max(0, at - MAX_MATCH_CHARS / 2);
+            block = block.slice(from, from + MAX_MATCH_CHARS) + ` [block trimmed to ${MAX_MATCH_CHARS} chars]`;
+            capped++;
+          }
           if (!matches.includes(block)) matches.push(block);
         }
       }
 
       if (matches.length === 0) {
-        return { content: [{ type: "text" as const, text: `No matches for "${query}" on ${url}\nTITLE: ${title}` }] };
+        return { content: [{ type: "text" as const, text: `No matches for "${query}" on ${finalUrl}\nTITLE: ${title}\nPAGE TEXT: ${text.length} chars searched` }] };
       }
 
       const result = [
-        `URL: ${url}`,
+        `URL: ${finalUrl}`,
+        ...(redirected(url, finalUrl) ? [`REQUESTED: ${url}`] : []),
         `TITLE: ${title}`,
-        `MATCHES FOR "${query}" (${matches.length}):`,
+        `MATCHES FOR "${query}": ${matches.length} block(s), ${occurrences} occurrence(s) in ${text.length} chars of page text${capped ? `, ${capped} block(s) trimmed` : ""}`,
         "",
         matches.map((m, i) => `[${i + 1}] ...${m}...`).join("\n\n"),
       ].join("\n");
@@ -256,7 +563,7 @@ server.registerTool(
     description: "Build a full structured map of a site in one call: every discovered page with title+summary, every form with fields+endpoint, every API hint. Returns a Site Awareness Object the AI can navigate programmatically. Use when you need to understand an entire site before taking action.",
     inputSchema: z.object({
       url: z.string().url().describe("The base URL of the site"),
-      maxPages: z.number().optional().default(10).describe("Max pages to crawl (default 10). Increase for larger sites."),
+      maxPages: z.number().int().positive().optional().default(10).describe("Max pages to FETCH (default 10) — the request budget, counting failures. Increase for larger sites."),
     }),
   },
   async ({ url, maxPages }) => {
@@ -265,27 +572,44 @@ server.registerTool(
       const visited: Map<string, { title: string; summary: string; forms: ReturnType<typeof extractForms>; apiHints: string[] }> = new Map();
       const queue: string[] = [url];
       const max = maxPages ?? 10;
+      // Requests, not stored pages. maxPages=10 against a page of 5,000 dead
+      // links used to issue 5,001 requests, because failures never entered
+      // `visited` and so never bounded the loop or the dedupe.
+      const seen = new Set<string>([new URL(url).pathname]);
+      const failures: Array<{ url: string; error: string }> = [];
+      const offOrigin: string[] = [];
+      let attempted = 0;
 
-      while (queue.length > 0 && visited.size < max) {
+      while (queue.length > 0 && attempted < max) {
         const current = queue.shift()!;
-        const currentPath = new URL(current).pathname;
-        if (visited.has(currentPath)) continue;
+        attempted++;
 
         try {
-          const html = await fetchHTML(current, 8000);
+          const { html, finalUrl } = await fetchHTML(current, 8000);
+          // A redirect off-origin must not be filed under this site's map.
+          if (new URL(finalUrl).origin !== origin) {
+            offOrigin.push(`${current} -> ${finalUrl}`);
+            continue;
+          }
+          const finalPath = new URL(finalUrl).pathname;
+          if (visited.has(finalPath)) continue;
           const text = htmlToText(html);
           const title = extractTitle(html);
           const summary = text.slice(0, 200).replace(/\n/g, " ");
-          const forms = extractForms(html, current);
+          const forms = extractForms(html, finalUrl);
           const apiHints = extractApiHints(html);
-          visited.set(currentPath, { title, summary, forms, apiHints });
+          visited.set(finalPath, { title, summary, forms, apiHints });
 
-          // Queue new same-origin links
-          for (const link of extractLinks(html, current)) {
+          // Queue new same-origin links, resolved against the URL that served them
+          for (const link of extractLinks(html, finalUrl)) {
             const linkPath = new URL(link).pathname;
-            if (!visited.has(linkPath) && link.startsWith(origin)) queue.push(link);
+            if (seen.has(linkPath)) continue;
+            seen.add(linkPath);
+            queue.push(link);
           }
-        } catch { /* skip failing pages */ }
+        } catch (e) {
+          failures.push({ url: current, error: e instanceof Error ? e.message : String(e) });
+        }
       }
 
       const allForms = [...visited.values()].flatMap(v => v.forms);
@@ -294,7 +618,15 @@ server.registerTool(
       const obj = {
         url,
         pagesScanned: visited.size,
+        // pagesScanned alone read as a small reassuring number while the
+        // crawler was hammering a site; these three say what actually happened.
+        pagesAttempted: attempted,
+        pagesFailed: failures.length,
+        budgetExhausted: attempted >= max && queue.length > 0,
+        linksQueuedUnvisited: queue.length,
         pages: [...visited.entries()].map(([path, v]) => ({ path, title: v.title, summary: v.summary })),
+        failures,
+        offOriginRedirectsSkipped: offOrigin,
         forms: allForms,
         apiHints: allApiHints,
       };

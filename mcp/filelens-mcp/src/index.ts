@@ -20,7 +20,7 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 
-const server = new McpServer({ name: "filelens", version: "0.1.0" });
+const server = new McpServer({ name: "filelens", version: "0.2.0" });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -29,7 +29,14 @@ const server = new McpServer({ name: "filelens", version: "0.1.0" });
 function readLines(filePath: string): string[] {
   const resolved = path.resolve(filePath);
   if (!fs.existsSync(resolved)) throw new Error(`File not found: ${resolved}`);
-  return fs.readFileSync(resolved, "utf-8").split("\n");
+  // split("\n") kept the empty string after the file's final newline as a line,
+  // so every file read exactly one line too long — 126/126 corpus files, e.g.
+  // 2687 for a 2686-line sessions.py, and 1 for a 0-byte file. file_chunk then
+  // served that phantom line as content. \r?\n also drops the CR that CRLF
+  // files were leaking into the end of every emitted line.
+  const lines = fs.readFileSync(resolved, "utf-8").split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
 }
 
 function detectLanguage(filePath: string): string {
@@ -98,7 +105,19 @@ function outlineJS(lines: string[]): OutlineNode[] {
     [/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/, "function"],
     [/^(?:export\s+)?class\s+(\w+)/, "class"],
     [/^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(/, "arrow fn"],
-    [/^\s{2,}(?:async\s+)?(\w+)\s*\(/, "method"],
+    // ^\s{2,}(\w+)\s*\( matched anything that opened a paren after an indent, so
+    // `if (`, `for (` and bare call sites all came back as methods: 3.1% of its
+    // "method" nodes were real across 500 files (1,868 true / 58,063 false), and
+    // 0 of scan.mjs's 101. \s{2,} also could not match a single tab, so
+    // tab-indented classes returned no methods at all. The pieces below, in
+    // order: \s+ picks up the one-tab indent; the keyword list drops control
+    // flow; (?![^)]*\bfunction\b) drops `it("x", function () {`-shaped call
+    // sites; \)\s*(?::…)?\s*\{ requires a body to open on the same line (with an
+    // optional TS return type) which drops the remaining call sites. Measured on
+    // the same 500 files: 1,844 true / 7 false — 99.6% precision at 79.0% recall
+    // versus the old 3.1% / 80.1%. Known cost: a real method named `catch`, and
+    // any signature whose `{` is on the next line, are missed.
+    [/^\s+(?:async\s+)?(?!(?:if|for|while|switch|catch|do|return|typeof|await|new|function)\b)(\w+)\s*\((?![^)]*\bfunction\b)[^)]*\)\s*(?::[^{;]+)?\s*\{/, "method"],
   ];
   for (let i = 0; i < lines.length; i++) {
     for (const [pattern, kind] of patterns) {
@@ -111,7 +130,21 @@ function outlineJS(lines: string[]): OutlineNode[] {
 
 function outlineMarkdown(lines: string[]): OutlineNode[] {
   const nodes: OutlineNode[] = [];
+  // With no fence state, every `#` shell comment inside a ```bash block was an
+  // h1: a 1,729-line README reported 63 headings where commonmark sees 41, and
+  // one wrapped sentence became three sibling h1 sections. Tracking which
+  // marker opened the fence (rather than toggling on either) keeps a ~~~ shown
+  // as an example inside a ```` block from closing it: 2 headings instead of 3
+  // on fixtures/nested.md.
+  let fence: string | null = null;
   for (let i = 0; i < lines.length; i++) {
+    const f = lines[i].match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (f) {
+      if (fence === null) fence = f[1][0];
+      else if (f[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence !== null) continue;
     const m = lines[i].match(/^(#{1,3})\s+(.+)/);
     if (m) nodes.push({ kind: `h${m[1].length}`, name: m[2].trim(), startLine: i + 1, children: [] });
   }
@@ -148,7 +181,13 @@ function chunkLines(filePath: string, start: number, end: number): string {
   const lines = readLines(filePath);
   const s = Math.max(1, start);
   const e = Math.min(lines.length, end);
-  return lines.slice(s - 1, e)
+  const selected = lines.slice(s - 1, e);
+  // Now that the phantom trailing line is gone, an entirely out-of-range request
+  // (chunk(1,10) on a 0-byte file, chunk(2687,2700) on sessions.py) returns
+  // nothing at all. Say so, rather than answer an empty string that reads like
+  // a blank line of real content.
+  if (selected.length === 0) return `(no lines: file has ${lines.length}, requested ${start}–${end})`;
+  return selected
     .map((line, i) => `${String(s + i).padStart(5)} │ ${line}`)
     .join("\n");
 }

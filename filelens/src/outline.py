@@ -102,7 +102,19 @@ def _outline_js(lines: list[str]) -> list[OutlineNode]:
         (r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", "function"),
         (r"^(?:export\s+)?class\s+(\w+)", "class"),
         (r"^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(", "arrow fn"),
-        (r"^\s+(?:async\s+)?(\w+)\s*\(", "method"),
+        # Kept in step with mcp/filelens-mcp/src/index.ts:outlineJS. `^\s+(\w+)\s*\(`
+        # matched anything that opened a paren after an indent, so `if (`, `for (`
+        # and bare call sites all came back as methods — 3.1% of the "method"
+        # nodes were real across 500 JS/TS files (1,868 true / 58,063 false), and
+        # 0 of scan.mjs's 101. The keyword list drops control flow,
+        # (?![^)]*\bfunction\b) drops `it("x", function () {`-shaped call sites,
+        # and \)\s*(?::…)?\s*\{ requires a body to open on the same line (with an
+        # optional TS return type). Same 500 files: 1,844 true / 7 false —
+        # 99.6% precision at 79.0% recall vs the old 3.1% / 80.1%. Known cost:
+        # a real method named `catch`, and any signature whose `{` is on the
+        # next line, are missed.
+        (r"^\s+(?:async\s+)?(?!(?:if|for|while|switch|catch|do|return|typeof|await|new|function)\b)"
+         r"(\w+)\s*\((?![^)]*\bfunction\b)[^)]*\)\s*(?::[^{;]+)?\s*\{", "method"),
     ]
     for i, line in enumerate(lines, 1):
         for pattern, kind in patterns:
@@ -115,7 +127,24 @@ def _outline_js(lines: list[str]) -> list[OutlineNode]:
 
 def _outline_markdown(lines: list[str]) -> list[OutlineNode]:
     nodes: list[OutlineNode] = []
+    # Kept in step with mcp/filelens-mcp/src/index.ts:outlineMarkdown. With no
+    # fence state, every `#` shell comment inside a ```bash block was an h1: a
+    # 1,729-line README reported 63 headings where commonmark sees 41, and one
+    # wrapped sentence became three sibling h1 sections. Tracking which marker
+    # opened the fence (rather than toggling on either) keeps a ~~~ shown as an
+    # example inside a ```` block from closing it: 2 headings instead of 3 on a
+    # nested-marker document.
+    fence: str | None = None
     for i, line in enumerate(lines, 1):
+        f = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if f:
+            if fence is None:
+                fence = f.group(1)[0]
+            elif f.group(1)[0] == fence:
+                fence = None
+            continue
+        if fence is not None:
+            continue
         m = re.match(r"^(#{1,3})\s+(.+)", line)
         if m:
             level = len(m.group(1))
