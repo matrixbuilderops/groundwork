@@ -35,12 +35,19 @@ function readLines(filePath: string): string[] {
 function detectLanguage(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   const map: Record<string, string> = {
-    ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
-    ".tsx": "TypeScript", ".jsx": "JavaScript", ".md": "Markdown",
+    // .mjs/.cjs and .mts/.cts were missing, so every ES-module project read as
+    // "text" and outlineJS never ran: a 438-line .mjs returned 0 symbols while
+    // the same code in a .js file returned its full outline. The JS parser was
+    // always correct — it just never got reached.
+    ".py": "Python", ".js": "JavaScript", ".mjs": "JavaScript",
+    ".cjs": "JavaScript", ".jsx": "JavaScript",
+    ".ts": "TypeScript", ".mts": "TypeScript", ".cts": "TypeScript",
+    ".tsx": "TypeScript", ".md": "Markdown",
     ".go": "Go", ".rs": "Rust", ".java": "Java", ".rb": "Ruby",
-    ".sh": "Shell", ".json": "JSON", ".yaml": "YAML", ".yml": "YAML",
+    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
+    ".json": "JSON", ".yaml": "YAML", ".yml": "YAML",
     ".toml": "TOML", ".html": "HTML", ".css": "CSS", ".cpp": "C++",
-    ".c": "C", ".cs": "C#",
+    ".c": "C", ".h": "C", ".hpp": "C++", ".cs": "C#",
   };
   return map[ext] ?? "text";
 }

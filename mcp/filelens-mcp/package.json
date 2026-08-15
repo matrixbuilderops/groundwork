@@ -1,7 +1,7 @@
 {
   "name": "filelens-mcp",
-  "version": "0.1.0",
-  "description": "MCP server — intelligent file reading for AI agents. Collapses outline→search→chunk into single tool calls.",
+  "version": "0.1.1",
+  "description": "MCP server \u2014 intelligent file reading for AI agents. Collapses outline\u2192search\u2192chunk into single tool calls.",
   "type": "module",
   "scripts": {
     "build": "tsc && chmod 755 build/index.js"
@@ -9,8 +9,18 @@
   "bin": {
     "filelens-mcp": "./build/index.js"
   },
-  "files": ["build"],
-  "keywords": ["mcp", "ai", "file-reading", "llm", "agent", "tools", "filelens"],
+  "files": [
+    "build"
+  ],
+  "keywords": [
+    "mcp",
+    "ai",
+    "file-reading",
+    "llm",
+    "agent",
+    "tools",
+    "filelens"
+  ],
   "author": "matrixbuilderops",
   "license": "MIT",
   "repository": {

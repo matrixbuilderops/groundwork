@@ -47,12 +47,20 @@ class FileOutline:
 
 
 def _detect_language(path: Path) -> str:
+    # Kept in step with mcp/filelens-mcp/src/index.ts:detectLanguage. The two
+    # copies had already drifted (that one carried .cpp/.c/.cs, this one did
+    # not), and both were missing .mjs/.cjs — so an ES-module project read as
+    # "text" and the JavaScript outliner never ran on it.
     ext_map = {
-        ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
-        ".tsx": "TypeScript", ".jsx": "JavaScript", ".md": "Markdown",
+        ".py": "Python", ".js": "JavaScript", ".mjs": "JavaScript",
+        ".cjs": "JavaScript", ".jsx": "JavaScript",
+        ".ts": "TypeScript", ".mts": "TypeScript", ".cts": "TypeScript",
+        ".tsx": "TypeScript", ".md": "Markdown",
         ".go": "Go", ".rs": "Rust", ".java": "Java", ".rb": "Ruby",
-        ".sh": "Shell", ".json": "JSON", ".yaml": "YAML", ".yml": "YAML",
-        ".toml": "TOML", ".html": "HTML", ".css": "CSS",
+        ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
+        ".json": "JSON", ".yaml": "YAML", ".yml": "YAML",
+        ".toml": "TOML", ".html": "HTML", ".css": "CSS", ".cpp": "C++",
+        ".c": "C", ".h": "C", ".hpp": "C++", ".cs": "C#",
     }
     return ext_map.get(path.suffix.lower(), "text")
 
