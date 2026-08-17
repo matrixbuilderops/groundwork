@@ -19,7 +19,7 @@ import { z } from "zod";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-const server = new McpServer({ name: "sitemap", version: "0.2.0" });
+const server = new McpServer({ name: "sitemap", version: "0.3.0" });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Destination policy
@@ -243,8 +243,11 @@ function stripChrome(html: string): { html: string; removed: number; unclosed: s
       if (closing) {
         if (--drop.depth === 0) {
           // Never let a chrome wrapper swallow the document's main content.
+          // <h1> counts as main content too: sites routinely put the page's
+          // one real headline and its lead paragraph inside <header>, and
+          // dropping the block took the headline with it.
           const slice = html.slice(drop.start, tagRe.lastIndex);
-          if (/<(main|article)\b/i.test(slice)) kept++;
+          if (/<(main|article|h1)\b/i.test(slice)) kept++;
           else cuts.push([drop.start, tagRe.lastIndex]);
           drop = null;
         }
@@ -273,12 +276,44 @@ function stripChrome(html: string): { html: string; removed: number; unclosed: s
  * note when a chrome element could not be closed — its content is still in
  * the output, and silently returning it would look identical to a clean page.
  */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+  copy: "©", reg: "®", trade: "™", hellip: "…",
+  mdash: "—", ndash: "–", bull: "•", middot: "·",
+  lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”",
+  laquo: "«", raquo: "»", deg: "°", plusmn: "±",
+  times: "×", divide: "÷", euro: "€", pound: "£",
+  yen: "¥", cent: "¢", sect: "§", para: "¶",
+  dagger: "†", prime: "′", frac12: "½", frac14: "¼",
+  frac34: "¾", ensp: " ", emsp: " ", thinsp: " ", shy: "",
+};
+
+/**
+ * Only &amp; &lt; &gt; &nbsp; &quot; and &#39; were decoded, so every other
+ * entity reached the agent as source text: a page reading "Caf&#233; &copy;
+ * 2026 &mdash; 5" came back with those six characters intact and the rest raw.
+ * Decoding in one pass matters — chained .replace() calls turn the literal
+ * "&amp;lt;" into "<" by decoding the ampersand and then re-reading its output.
+ */
+function decodeEntities(s: string): string {
+  return s.replace(/&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (whole, body: string) => {
+    if (body[0] === "#") {
+      const code = body[1] === "x" || body[1] === "X"
+        ? parseInt(body.slice(2), 16)
+        : parseInt(body.slice(1), 10);
+      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return whole;
+      try { return String.fromCodePoint(code); } catch { return whole; }
+    }
+    return NAMED_ENTITIES[body] ?? whole;
+  });
+}
+
 function tagsToText(html: string): string {
-  return html
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  return decodeEntities(
+    html
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/<[^>]+>/g, " ")
+  )
     .replace(/\s{3,}/g, "\n\n")
     .trim();
 }

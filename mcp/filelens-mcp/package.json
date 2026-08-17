@@ -1,6 +1,6 @@
 {
   "name": "filelens-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server \u2014 intelligent file reading for AI agents. Collapses outline\u2192search\u2192chunk into single tool calls.",
   "type": "module",
   "scripts": {

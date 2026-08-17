@@ -20,7 +20,7 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 
-const server = new McpServer({ name: "filelens", version: "0.2.0" });
+const server = new McpServer({ name: "filelens", version: "0.3.0" });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -67,6 +67,106 @@ interface OutlineNode {
   children: OutlineNode[];
 }
 
+// endLine was `lineNum - 1` — the line before the next top-level def, which is
+// not where anything ends. altair/utils/core.py reported `class DataFrameLike
+// lines 61–223` for a class that ends at 64, and every `def` carried no end at
+// all, so the outline was a list of pins: you could see that parse_shorthand
+// started at 517 but had to guess where to stop reading. The two scanners below
+// compute the real end — measured against Python's own ast over 400 stdlib
+// files (15,340/15,350 exact, 99.93%) and against the TypeScript compiler over
+// 205 hand-written zod/ajv sources (1,091/1,131 exact, 96.5%).
+
+/** Last line of a Python def/class body, 1-indexed. */
+function pythonBlockEnd(lines: string[], startIdx: number, headerIndent: number): number {
+  // The signature can span lines, so find where the body actually starts.
+  let depth = 0;
+  let sigEnd = startIdx;
+  for (let i = startIdx; i < lines.length; i++) {
+    const code = lines[i].replace(/#.*$/, "");
+    for (const ch of code) {
+      if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    }
+    sigEnd = i;
+    if (depth <= 0) {
+      const colon = code.lastIndexOf(":");
+      if (colon !== -1) {
+        // `def _f(): pass` puts the body on the header line and ends there.
+        // Without this the scan runs to EOF hunting a line that ends in ":".
+        if (code.slice(colon + 1).trim() !== "") return i + 1;
+        break;
+      }
+    }
+  }
+  // The body is every line indented past the header. Blank lines and full-line
+  // comments belong to whatever surrounds them — a `#` flush at column 0 inside
+  // a class body must not end the class (aifc.py, asyncio/*).
+  let end = sigEnd;
+  let quote: string | null = null;
+  for (let j = sigEnd + 1; j < lines.length; j++) {
+    const line = lines[j];
+    if (quote) {
+      // A file that handles quote characters as data (ast.py, tokenize.py) can
+      // fool the delimiter count; never let that swallow the rest of the file.
+      if (line.length - line.trimStart().length <= headerIndent &&
+          /^\s*(?:@|(?:async\s+)?def\s|class\s)/.test(line)) break;
+      end = j;
+      if (line.includes(quote)) quote = null;
+      continue;
+    }
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= headerIndent) break;
+    end = j;
+    // An odd count means one delimiter is left open.
+    if ((trimmed.match(/"""/g) || []).length % 2 === 1) quote = '"""';
+    else if ((trimmed.match(/'''/g) || []).length % 2 === 1) quote = "'''";
+  }
+  return end + 1;
+}
+
+/** Last line of a brace-delimited JS/TS block, 1-indexed. */
+function braceBlockEnd(lines: string[], startIdx: number): number {
+  const LOOKAHEAD = 20;
+  let depth = 0;
+  let started = false;
+  let inBlockComment = false;
+  for (let i = startIdx; i < lines.length; i++) {
+    if (!started && i - startIdx > LOOKAHEAD) return startIdx + 1;
+    const line = lines[i];
+    let str: string | null = null;
+    let tail = "";
+    for (let k = 0; k < line.length; k++) {
+      const c = line[k];
+      const n = line[k + 1];
+      if (inBlockComment) {
+        if (c === "*" && n === "/") { inBlockComment = false; k++; }
+        continue;
+      }
+      if (str) {
+        if (c === "\\") k++;
+        else if (c === str) str = null;
+        continue;
+      }
+      if (c === "/" && n === "/") break;
+      if (c === "/" && n === "*") { inBlockComment = true; k++; continue; }
+      if (c.trim() !== "") tail = (tail + c).slice(-2);
+      if (c === '"' || c === "'" || c === "`") { str = c; continue; }
+      if (c === "{") { depth++; started = true; }
+      else if (c === "}") depth--;
+    }
+    // Settle only at a line boundary. A TS type annotation such as
+    // `): { [k in U[number]]: k } => {` opens and closes a brace mid-line, and
+    // treating that as the body truncated the block to its first line.
+    if (tail === "=>") continue;
+    if (started && depth <= 0) return i + 1;
+    // An expression-bodied arrow never opens a brace; it ends at its statement.
+    if (!started && depth <= 0 && tail.endsWith(";")) return i + 1;
+  }
+  return started ? lines.length : startIdx + 1;
+}
+
 function outlinePython(lines: string[]): OutlineNode[] {
   const nodes: OutlineNode[] = [];
   let currentClass: OutlineNode | null = null;
@@ -77,8 +177,10 @@ function outlinePython(lines: string[]): OutlineNode[] {
 
     const classMatch = line.match(/^class\s+(\w+)/);
     if (classMatch) {
-      if (currentClass) currentClass.endLine = lineNum - 1;
-      currentClass = { kind: "class", name: classMatch[1], startLine: lineNum, children: [] };
+      currentClass = {
+        kind: "class", name: classMatch[1], startLine: lineNum,
+        endLine: pythonBlockEnd(lines, i, 0), children: [],
+      };
       nodes.push(currentClass);
       continue;
     }
@@ -87,11 +189,19 @@ function outlinePython(lines: string[]): OutlineNode[] {
     if (fnMatch) {
       const indent = fnMatch[1].length;
       const name = fnMatch[2];
-      const node: OutlineNode = { kind: "def", name, startLine: lineNum, children: [] };
-      if (indent > 0 && currentClass) {
+      const node: OutlineNode = {
+        kind: "def", name, startLine: lineNum,
+        endLine: pythonBlockEnd(lines, i, indent), children: [],
+      };
+      // With a real class end available, a def is a method only when it falls
+      // inside the class body. Keying off "indented and a class was seen" put
+      // every def after a nested class under the wrong parent — 343 of 15,444
+      // stdlib symbols, e.g. argparse's _Section methods filed under
+      // HelpFormatter.
+      if (indent > 0 && currentClass && lineNum <= currentClass.endLine!) {
         currentClass.children.push(node);
       } else {
-        if (currentClass) { currentClass.endLine = lineNum - 1; currentClass = null; }
+        if (currentClass && lineNum > currentClass.endLine!) currentClass = null;
         nodes.push(node);
       }
     }
@@ -104,7 +214,13 @@ function outlineJS(lines: string[]): OutlineNode[] {
   const patterns: [RegExp, string][] = [
     [/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/, "function"],
     [/^(?:export\s+)?class\s+(\w+)/, "class"],
-    [/^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(/, "arrow fn"],
+    // `^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(` demanded a paren
+    // immediately after `=` at column 0, so it saw none of the shapes TS
+    // actually writes: an arrow inside a namespace (zod's util.ts declares 20
+    // that way), a generic `<T>(…) =>`, a `: Type =` annotation before the
+    // arrow, or a single unparenthesised parameter. Requiring the `=>` instead
+    // of a bare `(` also stops `const x = (a + b)` being called a function.
+    [/^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:<[^>]*>\s*)?(?:\([^)]*\)|\w+)\s*(?::[^=>]+)?=>/, "arrow fn"],
     // ^\s{2,}(\w+)\s*\( matched anything that opened a paren after an indent, so
     // `if (`, `for (` and bare call sites all came back as methods: 3.1% of its
     // "method" nodes were real across 500 files (1,868 true / 58,063 false), and
@@ -122,7 +238,10 @@ function outlineJS(lines: string[]): OutlineNode[] {
   for (let i = 0; i < lines.length; i++) {
     for (const [pattern, kind] of patterns) {
       const m = lines[i].match(pattern);
-      if (m) { nodes.push({ kind, name: m[1], startLine: i + 1, children: [] }); break; }
+      if (m) {
+        nodes.push({ kind, name: m[1], startLine: i + 1, endLine: braceBlockEnd(lines, i), children: [] });
+        break;
+      }
     }
   }
   return nodes;
@@ -170,7 +289,7 @@ function buildOutline(filePath: string): { language: string; totalLines: number;
       const c = n.children[j];
       const cp = j < n.children.length - 1 ? "│   ├──" : "│   └──";
       const ce = c.endLine ? `–${c.endLine}` : "";
-      parts.push(`${cp} ${c.name}()  line ${c.startLine}${ce}`);
+      parts.push(`${cp} ${c.name}()  lines ${c.startLine}${ce}`);
     }
   }
 
