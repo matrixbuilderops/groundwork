@@ -55,9 +55,18 @@ test("python: every emitted symbol carries the exact range ast reports", async (
   }
 });
 
-test("python: a def inside a docstring is not a symbol", { todo: "false positive: docstring text is matched as a def" }, async () => {
+test("python: a def inside a docstring is not a symbol", async () => {
   const { text } = await callText("file_outline", { path: PY });
-  assert.ok(!parseOutlineRows(text).has("not_real"));
+  assert.ok(!parseOutlineRows(text).has("not_real"), "docstring example emitted as a symbol");
+  assert.ok(!parseOutlineRows(text).has("NotReal"));
+});
+
+test("python: a triple-quote stored as data does not mask the rest of the file", async () => {
+  const { text } = await callText("file_outline", { path: PY });
+  // QUOTE_AS_DATA = "'''" precedes these; counting delimiters per line hid them.
+  const rows = parseOutlineRows(text);
+  assert.ok(rows.has("after_quote_data"), "symbols after a quote-as-data line went missing");
+  assert.ok(rows.has("Trailing"));
 });
 
 test("python: a def nested in a function is not a method of the enclosing class", async () => {

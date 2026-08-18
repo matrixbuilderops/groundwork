@@ -221,10 +221,55 @@ function braceBlockEnd(lines: string[], startIdx: number): number {
   return started ? lines.length : startIdx + 1;
 }
 
+/**
+ * Which lines sit inside a triple-quoted string.
+ *
+ * Docstrings routinely contain example code, and `^class`/`^def` matched it:
+ * abc.py contributed four phantom symbols from the usage examples in its module
+ * docstring alone. The opening line is not masked — a `"""` that opens on the
+ * same line as real code should not hide that code.
+ */
+function docstringMask(lines: string[]): boolean[] {
+  const mask = new Array<boolean>(lines.length).fill(false);
+  let triple: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (triple) mask[i] = true;
+    let k = 0;
+    while (k < line.length) {
+      if (triple) {
+        if (line.startsWith(triple, k)) { triple = null; k += 3; continue; }
+        k++;
+        continue;
+      }
+      const c = line[k];
+      if (c === "#") break;
+      if (c === '"' || c === "'") {
+        const three = line.slice(k, k + 3);
+        if (three === '"""' || three === "'''") { triple = three; k += 3; continue; }
+        // A single-quoted string, which is where a bare `'''` hides: counting
+        // delimiters per line made `QUOTE_AS_DATA = "'''"` open a docstring and
+        // mask the whole rest of the file.
+        k++;
+        while (k < line.length) {
+          if (line[k] === "\\") { k += 2; continue; }
+          if (line[k] === c) { k++; break; }
+          k++;
+        }
+        continue;
+      }
+      k++;
+    }
+  }
+  return mask;
+}
+
 function outlinePython(lines: string[]): OutlineNode[] {
   const nodes: OutlineNode[] = [];
+  const inDocstring = docstringMask(lines);
 
   for (let i = 0; i < lines.length; i++) {
+    if (inDocstring[i]) continue;
     const line = lines[i];
     const lineNum = i + 1;
 
@@ -538,6 +583,14 @@ function searchFile(filePath: string, query: string, contextLines: number, maxRe
 server.registerTool(
   "file_outline",
   {
+    title: "Outline a file",
+    annotations: {
+      title: "Outline a file",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: "Scan a file's structure: classes, functions, headings with line numbers. Always call this first before reading content. Returns a tree-style outline so you know exactly where everything lives before fetching any chunk.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),
@@ -568,6 +621,14 @@ server.registerTool(
 server.registerTool(
   "file_search",
   {
+    title: "Search within a file",
+    annotations: {
+      title: "Search within a file",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: "Search a file for a keyword or regex pattern. Returns matching lines with surrounding context and exact line numbers. Use when you know what you're looking for but not where it is. Follow up with file_chunk to read the full section.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),
@@ -604,6 +665,14 @@ server.registerTool(
 server.registerTool(
   "file_chunk",
   {
+    title: "Read a line range",
+    annotations: {
+      title: "Read a line range",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: "Read a precise line range from a file, with line numbers. Use after file_outline or file_search tells you exactly which lines you need. Lines are 1-indexed and inclusive.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),
@@ -628,6 +697,14 @@ server.registerTool(
 server.registerTool(
   "file_summarize",
   {
+    title: "Summarize a file",
+    annotations: {
+      title: "Summarize a file",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: "Get a full picture of a file in one call: structure outline + first 40 lines + last 20 lines. No LLM required. Use when you've never seen a file before and need to decide which part to read next.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),
@@ -671,6 +748,14 @@ server.registerTool(
 server.registerTool(
   "file_fetch",
   {
+    title: "Fetch a symbol",
+    annotations: {
+      title: "Fetch a symbol",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: "Fetch a symbol by name in one call: resolves the name against the file's structure and returns that definition's exact line range and body. Falls back to a text search when the name matches no symbol. Use when you know what you want to read — this replaces outline→find the line→chunk.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),

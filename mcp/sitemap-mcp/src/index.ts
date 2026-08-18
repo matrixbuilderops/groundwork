@@ -373,11 +373,18 @@ function extractTitle(html: string): string {
 function extractLinks(html: string, baseUrl: string): string[] {
   const origin = new URL(baseUrl).origin;
   const links: Set<string> = new Set();
-  const re = /href=["']([^"'#?][^"']*?)["']/gi;
+  // The old class `[^"'#?]` rejected any href whose FIRST character was # or ?,
+  // which threw away the page author's own table of contents — the highest-
+  // signal structure on a docs page — along with every `?page=2` pagination
+  // link. Fragments are kept as same-page anchors and reported separately, so
+  // they inform the reader without being queued as pages to fetch.
+  const re = /href\s*=\s*["']([^"']+)["']/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
+    const raw = m[1].trim();
+    if (raw === "" || /^(javascript|mailto|tel|data):/i.test(raw)) continue;
     try {
-      const abs = new URL(m[1], baseUrl);
+      const abs = new URL(raw, baseUrl);
       // startsWith let https://example.com match https://example.com.cdn.net.
       if (abs.origin === origin) links.add(abs.href);
     } catch { /* skip malformed */ }
@@ -423,9 +430,22 @@ function extractApiHints(html: string): string[] {
 }
 
 /** Check if page likely requires auth */
+/**
+ * Bare substring tests fired on ordinary prose: "401" matched "Room P401
+ * schedule" and "price $401", and "login" matched "logins" in a sentence about
+ * anything. Word boundaries keep the signal and drop those.
+ */
+const AUTH_SIGNALS = [
+  /\blog\s?in\b/i, /\bsign\s?in\b/i, /\bsign\s?up\b/i,
+  /\bplease authenticate\b/i, /\bauthentication required\b/i,
+  /\bunauthorized\b/i, /\baccess denied\b/i,
+  /\b401\b\s*(?:error|unauthorized|forbidden)?/i,
+];
+
 function requiresAuth(text: string): boolean {
-  const lower = text.toLowerCase();
-  return ["log in", "login", "sign in", "signin", "please authenticate", "unauthorized", "401"].some(s => lower.includes(s));
+  // A bare `401` is only a signal next to auth language, not on its own.
+  return AUTH_SIGNALS.slice(0, -1).some(re => re.test(text)) ||
+    /\b401\b\s*(?:error|unauthorized|forbidden)|(?:error|status)\s*:?\s*\b401\b/i.test(text);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -439,6 +459,14 @@ function requiresAuth(text: string): boolean {
 server.registerTool(
   "site_fetch_page",
   {
+    title: "Fetch a page as text",
+    annotations: {
+      title: "Fetch a page as text",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description: "Fetch a URL and return clean readable text — no HTML tags, no scripts, no navbars. Strips all noise and returns just the content. Use instead of curl+grep when you want readable page content in one call.",
     inputSchema: z.object({
       url: z.string().url().describe("The URL to fetch"),
@@ -469,12 +497,21 @@ server.registerTool(
 server.registerTool(
   "site_outline",
   {
+    title: "Outline a site",
+    annotations: {
+      title: "Outline a site",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description: "Discover what pages and routes exist on a site. Fetches the root page and extracts all same-origin links, forms, and API hints — without fetching every page. Returns a structured map so you know what's available before deciding what to read.",
     inputSchema: z.object({
       url: z.string().url().describe("The base URL of the site (e.g. https://example.com)"),
+      maxChars: z.number().int().positive().optional().default(8000).describe("Max characters to return (default 8000)"),
     }),
   },
-  async ({ url }) => {
+  async ({ url, maxChars }) => {
     try {
       const { html, finalUrl } = await fetchHTML(url);
       const title = extractTitle(html);
@@ -488,15 +525,31 @@ server.registerTool(
       // so feeding it the cleaned text would turn true into false.
       const authRequired = requiresAuth(tagsToText(html));
 
-      const parts = [
+      // Anchors point inside THIS page; pages are somewhere else. Listing them
+      // together made a docs page's own contents indistinguishable from its
+      // outbound navigation.
+      const here = new URL(finalUrl);
+      const anchors: string[] = [];
+      const pages: string[] = [];
+      for (const l of links) {
+        const u = new URL(l);
+        if (u.hash && u.pathname === here.pathname && u.search === here.search) anchors.push(u.hash);
+        else pages.push(l);
+      }
+
+      const head = [
         `SITE: ${finalUrl}`,
         ...(redirected(url, finalUrl) ? [`REQUESTED: ${url}`] : []),
         `TITLE: ${title}`,
         `AUTH REQUIRED: ${authRequired}`,
         "",
-        `DISCOVERED LINKS (${links.length}):`,
-        ...links.map(l => `  ${l}`),
-      ];
+      ].join("\n");
+
+      const parts = [`PAGES (${pages.length}):`, ...pages.map(l => `  ${l}`)];
+
+      if (anchors.length > 0) {
+        parts.push("", `SECTIONS ON THIS PAGE (${anchors.length}):`, ...anchors.map(a => `  ${a}`));
+      }
 
       if (forms.length > 0) {
         parts.push("", `FORMS (${forms.length}):`);
@@ -507,7 +560,9 @@ server.registerTool(
         parts.push("", `API HINTS (${apiHints.length}):`, ...apiHints.map(h => `  ${h}`));
       }
 
-      return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+      // fitToBudget was called by site_fetch_page alone; the tool named
+      // "outline" would happily emit every one of 4,000 links.
+      return { content: [{ type: "text" as const, text: fitToBudget(head, parts.join("\n"), maxChars ?? 8000) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
     }
@@ -521,6 +576,14 @@ server.registerTool(
 server.registerTool(
   "site_search_page",
   {
+    title: "Search a page",
+    annotations: {
+      title: "Search a page",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description: "Fetch a URL and search it for a term in one call. Returns only the matching paragraphs/sections, not the whole page. Use when you want to know if/where a specific topic appears on a page without reading the whole thing. Replaces fetch+grep with a single call.",
     inputSchema: z.object({
       url: z.string().url().describe("The URL to fetch and search"),
@@ -595,6 +658,14 @@ server.registerTool(
 server.registerTool(
   "site_awareness",
   {
+    title: "Map a site",
+    annotations: {
+      title: "Map a site",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description: "Build a full structured map of a site in one call: every discovered page with title+summary, every form with fields+endpoint, every API hint. Returns a Site Awareness Object the AI can navigate programmatically. Use when you need to understand an entire site before taking action.",
     inputSchema: z.object({
       url: z.string().url().describe("The base URL of the site"),

@@ -80,8 +80,7 @@ test("a redirect to another origin is not filed under this site", async () => {
   });
 });
 
-test("fragment links are discovered — they are the page's own table of contents",
-  { todo: "extractLinks' [^\"'#?] class drops fragment-only and query-only hrefs" }, async () => {
+test("fragment links are discovered — they are the page's own table of contents", async () => {
   await withSite({ "/": TOC, "/docs/deep": "<title>Deep</title><main>deep</main>" }, async site => {
     const { text } = await callTool("site_outline", { url: site.origin + "/" });
     assert.match(text, /#install/, "fragment link dropped");
@@ -89,15 +88,14 @@ test("fragment links are discovered — they are the page's own table of content
   });
 });
 
-test("auth detection does not fire on a bare 401 inside unrelated prose",
-  { todo: "requiresAuth tests the substring \"401\"" }, async () => {
+test("auth detection does not fire on a bare 401 inside unrelated prose", async () => {
   await withSite({ "/": `<title>Rooms</title><main>Room P401 schedule, price $401.</main>` }, async site => {
     const { text } = await callTool("site_outline", { url: site.origin + "/" });
     assert.match(text, /AUTH REQUIRED: false/);
   });
 });
 
-test("site_outline bounds its own output", { todo: "site_outline has no budget and no maxChars" }, async () => {
+test("site_outline bounds its own output", async () => {
   const many = Array.from({ length: 4000 }, (_, i) => `<a href="/p/${i}">p${i}</a>`).join("");
   await withSite({ "/": `<title>Many</title><main>${many}</main>` }, async site => {
     const { text } = await callTool("site_outline", { url: site.origin + "/" });
