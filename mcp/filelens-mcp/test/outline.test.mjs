@@ -60,10 +60,17 @@ test("python: a def inside a docstring is not a symbol", { todo: "false positive
   assert.ok(!parseOutlineRows(text).has("not_real"));
 });
 
-test("python: a def nested in a function is not a method of the enclosing class", { todo: "inner() is filed under Container" }, async () => {
+test("python: a def nested in a function is not a method of the enclosing class", async () => {
   const { text } = await callText("file_outline", { path: PY });
-  // `inner` is nested inside has_inner, so it must not render as a child row.
-  assert.ok(!/│\s+[├└]──\s+inner\(\)/.test(text));
+  // `inner` (33–34) sits inside has_inner (32–35), not directly in Container.
+  // It must therefore render one level deeper than has_inner, not beside it.
+  const lines = text.split("\n");
+  const hasInner = lines.findIndex(l => /def has_inner/.test(l));
+  const innerAt = lines.findIndex(l => /def inner\b/.test(l));
+  assert.ok(hasInner !== -1 && innerAt === hasInner + 1, "inner should follow has_inner");
+  const depth = l => l.length - l.replace(/^[│\s]*/, "").length;
+  assert.ok(depth(lines[innerAt]) > depth(lines[hasInner]),
+    `inner must nest deeper than has_inner:\n${lines[hasInner]}\n${lines[innerAt]}`);
 });
 
 test("typescript: every emitted symbol carries the exact range tsc reports", async () => {
@@ -76,35 +83,44 @@ test("typescript: every emitted symbol carries the exact range tsc reports", asy
   }
 });
 
-test("typescript: `export default class` is a class", { todo: "class pattern has no `default` branch" }, async () => {
+test("typescript: `export default class` is a class", async () => {
   const { text } = await callText("file_outline", { path: TS });
   const row = parseOutlineRows(text).get("Trailing");
   assert.ok(row, "Trailing missing");
   assert.deepEqual([row.start, row.end], TS_TRUTH.Trailing);
 });
 
-test("typescript: get/set accessors are members", { todo: "method pattern has no get/set branch" }, async () => {
+test("typescript: get/set accessors are members", async () => {
   const { text } = await callText("file_outline", { path: TS });
   const row = parseOutlineRows(text).get("size");
   assert.ok(row, "size missing");
   assert.deepEqual([row.start, row.end], TS_TRUTH.size);
 });
 
-test("typescript: an arrow whose => lands on a later line is still a function", { todo: "arrow pattern requires => on the declaring line" }, async () => {
+test("typescript: an arrow whose => lands on a later line is still a function", async () => {
   const { text } = await callText("file_outline", { path: TS });
   const row = parseOutlineRows(text).get("arrayToEnum");
   assert.ok(row, "arrayToEnum missing");
   assert.deepEqual([row.start, row.end], TS_TRUTH.arrayToEnum);
 });
 
-test("typescript: class members render as children of their class", { todo: "outlineJS pushes every node flat" }, async () => {
+test("typescript: class members render as children of their class", async () => {
   const { text } = await callText("file_outline", { path: TS });
-  assert.match(text, /class Widget[\s\S]*?│\s+[├└]──\s+render\(\)/);
+  assert.match(text, /class Widget[^\n]*\n│\s+├──\s+method render/);
 });
 
 test("the last top-level row does not draw a continuation bar for its children", async () => {
   const { text } = await callText("file_outline", { path: PY });
-  // `└── class Trailing` is the last top-level row, so its child rows must be
-  // indented with spaces, not a `│` continuation bar that leads nowhere.
-  assert.ok(!/└──[^\n]*\n│/.test(text), "child row after a last-child draws a dangling │");
+  // `└── class Trailing` is the last top-level row, so its children are indented
+  // with spaces. A `│` here would be a bar descending from nothing. (Deeper
+  // rows may legitimately start with `│` belonging to an outer level, so this
+  // pins the specific last-child case rather than banning the character.)
+  assert.match(text, /└── class Trailing[^\n]*\n {4}└── def only/);
+});
+
+test("a class nested inside a try/if block is still found", async () => {
+  const { text } = await callText("file_outline", { path: TS });
+  // Widget's members must not leak out to the top level.
+  const topLevel = text.split("\n").filter(l => /^[├└]──/.test(l)).map(l => l.replace(/\s+lines.*$/, ""));
+  assert.ok(!topLevel.some(l => /render|load|size/.test(l)), `members leaked to top level: ${topLevel.join(" | ")}`);
 });

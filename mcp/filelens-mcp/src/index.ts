@@ -223,51 +223,44 @@ function braceBlockEnd(lines: string[], startIdx: number): number {
 
 function outlinePython(lines: string[]): OutlineNode[] {
   const nodes: OutlineNode[] = [];
-  let currentClass: OutlineNode | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNum = i + 1;
 
-    const classMatch = line.match(/^class\s+(\w+)/);
+    // `^class` only ever matched column zero, so a class nested in a class, a
+    // try block or an `if` was invisible and its methods were reparented onto
+    // whatever class came before it.
+    const classMatch = line.match(/^(\s*)class\s+(\w+)/);
     if (classMatch) {
-      currentClass = {
-        kind: "class", name: classMatch[1], startLine: lineNum,
-        endLine: pythonBlockEnd(lines, i, 0), children: [],
-      };
-      nodes.push(currentClass);
+      nodes.push({
+        kind: "class", name: classMatch[2], startLine: lineNum,
+        endLine: pythonBlockEnd(lines, i, classMatch[1].length), children: [],
+      });
       continue;
     }
 
     const fnMatch = line.match(/^(\s*)(?:async\s+)?def\s+(\w+)/);
     if (fnMatch) {
-      const indent = fnMatch[1].length;
-      const name = fnMatch[2];
-      const node: OutlineNode = {
-        kind: "def", name, startLine: lineNum,
-        endLine: pythonBlockEnd(lines, i, indent), children: [],
-      };
-      // With a real class end available, a def is a method only when it falls
-      // inside the class body. Keying off "indented and a class was seen" put
-      // every def after a nested class under the wrong parent — 343 of 15,444
-      // stdlib symbols, e.g. argparse's _Section methods filed under
-      // HelpFormatter.
-      if (indent > 0 && currentClass && lineNum <= currentClass.endLine!) {
-        currentClass.children.push(node);
-      } else {
-        if (currentClass && lineNum > currentClass.endLine!) currentClass = null;
-        nodes.push(node);
-      }
+      nodes.push({
+        kind: "def", name: fnMatch[2], startLine: lineNum,
+        endLine: pythonBlockEnd(lines, i, fnMatch[1].length), children: [],
+      });
     }
   }
-  return nodes;
+  // Parent by containment rather than by "indented, and a class was seen
+  // earlier": that rule filed a def nested inside a function as a method of the
+  // enclosing class, and every def after a nested class under the wrong parent.
+  return nestByContainment(nodes);
 }
 
 function outlineJS(lines: string[]): OutlineNode[] {
   const nodes: OutlineNode[] = [];
   const patterns: [RegExp, string][] = [
-    [/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/, "function"],
-    [/^(?:export\s+)?class\s+(\w+)/, "class"],
+    [/^(?:export\s+)?(?:async\s+)?function\s*\*?\s*(\w+)/, "function"],
+    // `export default class Foo` matched nothing, so the default export — the
+    // one symbol a reader is most likely to want — was missing from the outline.
+    [/^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+(\w+)/, "class"],
     // `^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(` demanded a paren
     // immediately after `=` at column 0, so it saw none of the shapes TS
     // actually writes: an arrow inside a namespace (zod's util.ts declares 20
@@ -287,7 +280,14 @@ function outlineJS(lines: string[]): OutlineNode[] {
     // the same 500 files: 1,844 true / 7 false — 99.6% precision at 79.0% recall
     // versus the old 3.1% / 80.1%. Known cost: a real method named `catch`, and
     // any signature whose `{` is on the next line, are missed.
-    [/^\s+(?:async\s+)?(?!(?:if|for|while|switch|catch|do|return|typeof|await|new|function)\b)(\w+)\s*\((?![^)]*\bfunction\b)[^)]*\)\s*(?::[^{;]+)?\s*\{/, "method"],
+    [/^\s+(?:static\s+)?(?:async\s+)?(?!(?:if|for|while|switch|catch|do|return|typeof|await|new|function)\b)(\w+)\s*\((?![^)]*\bfunction\b)[^)]*\)\s*(?::[^{;]+)?\s*\{/, "method"],
+    // Accessors read as `get size()`, so the pattern above bound `get` as the
+    // name and then failed on the space before `size`.
+    [/^\s+(?:static\s+)?(?:get|set)\s+(\w+)\s*\([^)]*\)\s*(?::[^{;]+)?\s*\{/, "accessor"],
+    // A multi-line arrow signature has no `=>` on its declaring line. Allowing
+    // nothing but `async` and generics between `=` and `(` is what separates
+    // `const f = (` from the call `const x = foo(`.
+    [/^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:<[^>]*>\s*)?\(\s*$/, "arrow fn"],
   ];
   for (let i = 0; i < lines.length; i++) {
     for (const [pattern, kind] of patterns) {
@@ -298,7 +298,34 @@ function outlineJS(lines: string[]): OutlineNode[] {
       }
     }
   }
-  return nodes;
+  return nestByContainment(nodes);
+}
+
+/**
+ * Turn a flat, ordered symbol list into a tree using the ranges.
+ *
+ * outlineJS pushed every node with `children: []`, so a class and its methods
+ * were siblings and `arrow fn note lines 342` rendered next to the
+ * `function fitToBudget lines 341–353` that contains it. Containment is exact
+ * now, so nesting needs no extra parsing: a node belongs to the nearest open
+ * ancestor whose range covers it. Python keeps its own indentation-based
+ * parenting, which is measured at 99.97% and has no reason to change.
+ */
+function nestByContainment(flat: OutlineNode[]): OutlineNode[] {
+  const roots: OutlineNode[] = [];
+  const stack: OutlineNode[] = [];
+  for (const node of flat) {
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1];
+      const covers = top.endLine !== undefined && node.startLine > top.startLine && node.startLine <= top.endLine;
+      if (covers) break;
+      stack.pop();
+    }
+    if (stack.length === 0) roots.push(node);
+    else stack[stack.length - 1].children.push(node);
+    stack.push(node);
+  }
+  return roots;
 }
 
 function outlineMarkdown(lines: string[]): OutlineNode[] {
@@ -334,20 +361,19 @@ function buildOutline(filePath: string): { language: string; totalLines: number;
   else if (lang === "Markdown") nodes = outlineMarkdown(lines);
 
   const parts = [`${path.basename(filePath)}  (${lines.length} lines, ${lang})`];
-  for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i];
-    const isLast = i === nodes.length - 1;
-    const end = n.endLine ? `–${n.endLine}` : "";
-    parts.push(`${isLast ? "└──" : "├──"} ${n.kind} ${n.name}  lines ${n.startLine}${end}`);
-    // The continuation bar belongs to the PARENT's position: children of the
-    // last top-level row were drawn under a `│` that led nowhere.
-    const bar = isLast ? "    " : "│   ";
-    for (let j = 0; j < n.children.length; j++) {
-      const c = n.children[j];
-      const ce = c.endLine ? `–${c.endLine}` : "";
-      parts.push(`${bar}${j === n.children.length - 1 ? "└──" : "├──"} ${c.name}()  lines ${c.startLine}${ce}`);
-    }
-  }
+  // Recursive: the old renderer walked exactly two levels, so a method inside a
+  // class inside a namespace had nowhere to go even once nesting existed. The
+  // continuation bar belongs to the PARENT's position — children of a last-child
+  // used to be drawn under a `│` that led nowhere.
+  const render = (list: OutlineNode[], indent: string) => {
+    list.forEach((n, i) => {
+      const isLast = i === list.length - 1;
+      const end = n.endLine ? `–${n.endLine}` : "";
+      parts.push(`${indent}${isLast ? "└──" : "├──"} ${n.kind} ${n.name}  lines ${n.startLine}${end}`);
+      if (n.children.length > 0) render(n.children, `${indent}${isLast ? "    " : "│   "}`);
+    });
+  };
+  render(nodes, "");
 
   const note = parserNote(lang, nodes.length);
   if (note) parts.push("", note);

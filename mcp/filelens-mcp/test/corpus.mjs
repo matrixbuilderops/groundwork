@@ -52,6 +52,11 @@ async function loadScanners() {
   }
 }
 
+/** Every node in the tree, at any depth — outlines nest now. */
+function flatten(nodes) {
+  return nodes.flatMap(n => [n, ...flatten(n.children ?? [])]);
+}
+
 /** Same contract as readLines() in the server. */
 function toLines(src) {
   const lines = src.split(/\r?\n/);
@@ -116,13 +121,11 @@ json.dump(out, sys.stdout)
     const rows = truth[f];
     if (!rows) continue;
     let src; try { src = fs.readFileSync(f, "utf8"); } catch { continue; }
-    for (const n of outlinePython(toLines(src))) {
-      for (const [kind, node] of [["class", n], ...n.children.map(c => ["func", c])]) {
-        const key = `${kind === "class" && node === n ? "class" : "func"}:${node.name}:${node.startLine}`;
-        if (!(key in rows)) continue;
-        total++;
-        if (node.endLine === rows[key]) exact++;
-      }
+    for (const node of flatten(outlinePython(toLines(src)))) {
+      const key = `${node.kind === "class" ? "class" : "func"}:${node.name}:${node.startLine}`;
+      if (!(key in rows)) continue;
+      total++;
+      if (node.endLine === rows[key]) exact++;
     }
   }
   return { total, exact, files: files.length };
@@ -154,7 +157,7 @@ async function scoreTypeScript(outlineJS) {
       if (name) truth.set(`${name}@${line(n.getStart(sf))}`, line(n.getEnd()));
       ts.forEachChild(n, walk);
     })(sf);
-    for (const n of outlineJS(toLines(src))) {
+    for (const n of flatten(outlineJS(toLines(src)))) {
       const key = `${n.name}@${n.startLine}`;
       if (!truth.has(key)) continue;
       total++;
