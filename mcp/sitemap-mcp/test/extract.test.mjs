@@ -102,3 +102,55 @@ test("site_outline bounds its own output", async () => {
     assert.ok(text.length < 100_000, `site_outline emitted ${text.length} chars unbounded`);
   });
 });
+
+const GUIDE = `<title>Guide</title><main>
+<h1 id="intro">Introduction</h1><p>Intro body.</p>
+<h2 id="install">Install</h2><p>Run npm install to begin.</p>
+<h2 id="usage">Usage</h2><p>Call the thing.</p>
+<h3>Advanced</h3><p>Deep detail.</p>
+</main>`;
+
+test("site_outline_page lists headings with their anchors and sizes", async () => {
+  await withSite({ "/": GUIDE }, async site => {
+    const { text } = await callTool("site_outline_page", { url: site.origin + "/" });
+    assert.match(text, /SECTIONS \(4,/);
+    assert.match(text, /h1 Introduction[^\n]*#intro/);
+    assert.match(text, /h2 Install[^\n]*#install/);
+    // Nesting should be visible, and the body must NOT come along.
+    assert.match(text, /\n {2}h2 Install/);
+    assert.ok(!/Run npm install/.test(text), "outline leaked page body");
+  });
+});
+
+test("site_fetch_page returns just the requested section", async () => {
+  await withSite({ "/": GUIDE }, async site => {
+    const { text } = await callTool("site_fetch_page", { url: site.origin + "/", section: "#install" });
+    assert.match(text, /SECTION: h2 Install \(#install\)/);
+    assert.match(text, /Run npm install/);
+    assert.ok(!/Deep detail/.test(text), "returned more than the section");
+    assert.ok(!/Intro body/.test(text));
+  });
+});
+
+test("a section can be addressed by heading text, not only by anchor", async () => {
+  await withSite({ "/": GUIDE }, async site => {
+    const { text } = await callTool("site_fetch_page", { url: site.origin + "/", section: "Advanced" });
+    assert.match(text, /Deep detail/);
+  });
+});
+
+test("an unknown section lists what is available instead of silently returning the page", async () => {
+  await withSite({ "/": GUIDE }, async site => {
+    const { text, isError } = await callTool("site_fetch_page", { url: site.origin + "/", section: "#nope" });
+    assert.ok(isError);
+    assert.match(text, /No section matching/);
+    assert.match(text, /#intro, #install, #usage/);
+  });
+});
+
+test("a page with no headings says so rather than pretending to have structure", async () => {
+  await withSite({ "/": `<title>Flat</title><main><p>Just prose.</p></main>` }, async site => {
+    const { text } = await callTool("site_outline_page", { url: site.origin + "/" });
+    assert.match(text, /No headings on this page/);
+  });
+});

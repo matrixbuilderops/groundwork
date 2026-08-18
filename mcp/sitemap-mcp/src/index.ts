@@ -7,8 +7,9 @@
  * reduce round trips by getting page structure + content in one shot.
  *
  * Tools exposed:
- *   site_fetch_page     — fetch one page, return clean text (no HTML noise)
- *   site_outline        — crawl site links/structure without fetching all content
+ *   site_fetch_page     — fetch one page (or one section of it) as clean text
+ *   site_outline        — pages, sections, forms and API hints linked from a page
+ *   site_outline_page   — one page's headings, so a section can be addressed
  *   site_search_page    — fetch a page + search it for a term in one call
  *   site_awareness      — full site map: pages, forms, actions, API hints
  */
@@ -370,6 +371,54 @@ function extractTitle(html: string): string {
 }
 
 /** Extract all same-origin links from HTML */
+interface Section {
+  level: number;
+  heading: string;
+  /** The `id`/`name` anchor, if the page gives one — this is what #fragments target. */
+  anchor: string | null;
+  /** Plain text of this heading's own content, up to the next heading. */
+  text: string;
+}
+
+/**
+ * Split a page into its heading sections.
+ *
+ * This is filelens's idea applied to HTML: a file is navigable because its
+ * outline gives every symbol a range you can fetch, and until now a page had no
+ * equivalent — sitemap could return a whole page or a sentence window, with no
+ * way to address the part in between. Headings are a page's own structure, the
+ * same way `def`/`class` are a file's, and #fragment anchors are the addresses
+ * the author already wrote down.
+ */
+function extractSections(html: string): Section[] {
+  const stripped = stripChrome(html).html;
+  const re = /<h([1-6])\b([^>]*)>([\s\S]*?)<\/h\1>/gi;
+  const found: Array<{ level: number; heading: string; anchor: string | null; at: number; after: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(stripped)) !== null) {
+    const heading = tagsToText(m[3]).replace(/\s+/g, " ").trim();
+    if (heading === "") continue;
+    const attrs = m[2];
+    const anchor = attrValue(attrs, "id") || attrValue(attrs, "name") || null;
+    found.push({ level: Number(m[1]), heading, anchor, at: m.index, after: re.lastIndex });
+  }
+  return found.map((h, i) => ({
+    level: h.level,
+    heading: h.heading,
+    anchor: h.anchor,
+    text: tagsToText(stripped.slice(h.after, i + 1 < found.length ? found[i + 1].at : stripped.length)),
+  }));
+}
+
+/** Match a section by #anchor, exact heading, or a case-insensitive substring. */
+function findSection(sections: Section[], want: string): Section | null {
+  const needle = want.replace(/^#/, "").toLowerCase();
+  return sections.find(s => s.anchor?.toLowerCase() === needle)
+    ?? sections.find(s => s.heading.toLowerCase() === needle)
+    ?? sections.find(s => s.heading.toLowerCase().includes(needle))
+    ?? null;
+}
+
 function extractLinks(html: string, baseUrl: string): string[] {
   const origin = new URL(baseUrl).origin;
   const links: Set<string> = new Set();
@@ -471,9 +520,10 @@ server.registerTool(
     inputSchema: z.object({
       url: z.string().url().describe("The URL to fetch"),
       maxChars: z.number().int().positive().optional().default(8000).describe("Max characters in the whole response, header included (default 8000). Use to stay within context limits."),
+      section: z.string().optional().describe("Return only one section: a #anchor or a heading from site_outline_page. Without it the whole page body is returned."),
     }),
   },
-  async ({ url, maxChars }) => {
+  async ({ url, maxChars, section }) => {
     try {
       const { html, finalUrl } = await fetchHTML(url);
       const title = extractTitle(html);
@@ -481,8 +531,26 @@ server.registerTool(
       const budget = maxChars ?? 8000;
       // URL: line reports what served the body, not what was asked for — a
       // 302 used to stamp the redirect target's content with the caller's URL.
-      const header = `URL: ${finalUrl}${redirected(url, finalUrl) ? `\nREQUESTED: ${url}` : ""}\nTITLE: ${title}\n${note}\n`;
-      return { content: [{ type: "text" as const, text: fitToBudget(header, text, budget) }] };
+      let header = `URL: ${finalUrl}${redirected(url, finalUrl) ? `\nREQUESTED: ${url}` : ""}\nTITLE: ${title}\n${note}\n`;
+      let body = text;
+
+      // Addressing one part of a page, the way file_chunk addresses part of a
+      // file. Without this the only choices were the whole body or a sentence
+      // window from search, with nothing in between.
+      if (section !== undefined && section !== "") {
+        const sections = extractSections(html);
+        const hit = findSection(sections, section);
+        if (!hit) {
+          const names = sections.map(s => s.anchor ? `#${s.anchor}` : s.heading);
+          return { content: [{ type: "text" as const, text:
+            `${header}No section matching ${JSON.stringify(section)} on this page.` +
+            (names.length ? `\nAvailable: ${names.join(", ")}` : "\nThis page has no headings.") }], isError: true };
+        }
+        header += `SECTION: h${hit.level} ${hit.heading}${hit.anchor ? ` (#${hit.anchor})` : ""}\n`;
+        body = hit.text;
+      }
+
+      return { content: [{ type: "text" as const, text: fitToBudget(header, body, budget) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: `Error fetching ${url}: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
     }
@@ -747,6 +815,62 @@ server.registerTool(
 // ─────────────────────────────────────────────────────────────────────────────
 // Start
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * site_outline_page — the structure of ONE page, so a section can be fetched.
+ */
+server.registerTool(
+  "site_outline_page",
+  {
+    title: "Outline a page",
+    annotations: {
+      title: "Outline a page",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description: "List a page's headings with their anchors and section sizes, without returning the page body. Use this first on a long page, then call site_fetch_page with `section` to read only the part you need.",
+    inputSchema: z.object({
+      url: z.string().url().describe("The URL to outline"),
+      maxChars: z.number().int().positive().optional().default(8000).describe("Max characters to return (default 8000)"),
+    }),
+  },
+  async ({ url, maxChars }) => {
+    try {
+      const { html, finalUrl } = await fetchHTML(url);
+      const title = extractTitle(html);
+      const sections = extractSections(html);
+
+      const head = [
+        `URL: ${finalUrl}`,
+        ...(redirected(url, finalUrl) ? [`REQUESTED: ${url}`] : []),
+        `TITLE: ${title}`,
+        "",
+      ].join("\n");
+
+      if (sections.length === 0) {
+        return { content: [{ type: "text" as const, text:
+          head + "No headings on this page — it has no internal structure to address. Use site_fetch_page for the whole body." }] };
+      }
+
+      const total = sections.reduce((n, s) => n + s.text.length, 0);
+      const rows = sections.map(s => {
+        const indent = "  ".repeat(Math.max(0, s.level - 1));
+        const addr = s.anchor ? `#${s.anchor}` : JSON.stringify(s.heading);
+        return `${indent}h${s.level} ${s.heading}  (${s.text.length} chars, section: ${addr})`;
+      });
+
+      return { content: [{ type: "text" as const, text: fitToBudget(
+        head,
+        [`SECTIONS (${sections.length}, ${total} chars of body text):`, ...rows].join("\n"),
+        maxChars ?? 8000,
+      ) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+    }
+  }
+);
 
 async function main() {
   const transport = new StdioServerTransport();
