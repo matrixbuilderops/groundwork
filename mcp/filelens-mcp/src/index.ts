@@ -26,9 +26,44 @@ const server = new McpServer({ name: "filelens", version: "0.3.0" });
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Refuse anything this big as text; a source file is never close. */
+const MAX_TEXT_BYTES = 32 * 1024 * 1024;
+/** Bytes sniffed for a NUL before deciding a file is binary. */
+const SNIFF_BYTES = 8192;
+
+/**
+ * Reject binaries before they are rendered as source.
+ *
+ * `file_chunk("/bin/ls", 1, 2)` returned 5,773 chars of ELF with a line-number
+ * gutter drawn down the side. That is the worst output this server can produce,
+ * because it is not an error — an agent will try to reason about it. A NUL byte
+ * in the first 8 KiB is the same rule `grep -I` and `git` use. UTF-16 text is
+ * full of NULs, so a BOM is checked first and wins.
+ */
+function assertTextFile(resolved: string): void {
+  const size = fs.statSync(resolved).size;
+  if (size > MAX_TEXT_BYTES) {
+    throw new Error(`File is ${size} bytes, over the ${MAX_TEXT_BYTES}-byte text limit. Use file_chunk with a line range.`);
+  }
+  if (size === 0) return;
+  const fd = fs.openSync(resolved, "r");
+  try {
+    const buf = Buffer.alloc(Math.min(SNIFF_BYTES, size));
+    const read = fs.readSync(fd, buf, 0, buf.length, 0);
+    const bom16 = read >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff));
+    if (!bom16 && buf.subarray(0, read).includes(0)) {
+      throw new Error(`File appears to be binary (NUL byte within the first ${read} bytes) — refusing to render it as text.`);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function readLines(filePath: string): string[] {
   const resolved = path.resolve(filePath);
   if (!fs.existsSync(resolved)) throw new Error(`File not found: ${resolved}`);
+  if (fs.statSync(resolved).isDirectory()) throw new Error(`Not a file (it is a directory): ${resolved}`);
+  assertTextFile(resolved);
   // split("\n") kept the empty string after the file's final newline as a line,
   // so every file read exactly one line too long — 126/126 corpus files, e.g.
   // 2687 for a 2686-line sessions.py, and 1 for a 0-byte file. file_chunk then
@@ -57,6 +92,25 @@ function detectLanguage(filePath: string): string {
     ".c": "C", ".h": "C", ".hpp": "C++", ".cs": "C#",
   };
   return map[ext] ?? "text";
+}
+
+/**
+ * Which languages actually have a scanner.
+ *
+ * detectLanguage names 28 extensions; buildOutline dispatches on 4 of them. A
+ * .rs file therefore reported `LANGUAGE: Rust`, a line count, and zero symbols
+ * — indistinguishable from a Rust file that genuinely defines nothing. Naming
+ * the gap in-band is the same discipline sitemap applies when it strips a
+ * block: say what you did not do, because silence looks like a real answer.
+ */
+const PARSED_LANGUAGES = new Set(["Python", "JavaScript", "TypeScript", "Markdown"]);
+
+function parserNote(lang: string, nodeCount: number): string | null {
+  if (PARSED_LANGUAGES.has(lang)) return null;
+  if (nodeCount > 0) return null;
+  return lang === "text"
+    ? "NOTE: unrecognised extension — no structure scanner ran. Line ranges and file_chunk still work."
+    : `NOTE: ${lang} has no structure scanner in filelens yet — this outline is empty because nothing parsed it, not because the file is empty. Line ranges and file_chunk still work.`;
 }
 
 interface OutlineNode {
@@ -282,16 +336,21 @@ function buildOutline(filePath: string): { language: string; totalLines: number;
   const parts = [`${path.basename(filePath)}  (${lines.length} lines, ${lang})`];
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
-    const prefix = i < nodes.length - 1 ? "├──" : "└──";
+    const isLast = i === nodes.length - 1;
     const end = n.endLine ? `–${n.endLine}` : "";
-    parts.push(`${prefix} ${n.kind} ${n.name}  lines ${n.startLine}${end}`);
+    parts.push(`${isLast ? "└──" : "├──"} ${n.kind} ${n.name}  lines ${n.startLine}${end}`);
+    // The continuation bar belongs to the PARENT's position: children of the
+    // last top-level row were drawn under a `│` that led nowhere.
+    const bar = isLast ? "    " : "│   ";
     for (let j = 0; j < n.children.length; j++) {
       const c = n.children[j];
-      const cp = j < n.children.length - 1 ? "│   ├──" : "│   └──";
       const ce = c.endLine ? `–${c.endLine}` : "";
-      parts.push(`${cp} ${c.name}()  lines ${c.startLine}${ce}`);
+      parts.push(`${bar}${j === n.children.length - 1 ? "└──" : "├──"} ${c.name}()  lines ${c.startLine}${ce}`);
     }
   }
+
+  const note = parserNote(lang, nodes.length);
+  if (note) parts.push("", note);
 
   return { language: lang, totalLines: lines.length, nodes, rendered: parts.join("\n") };
 }
@@ -319,24 +378,126 @@ interface SearchMatch {
   rendered: string;
 }
 
-function searchFile(filePath: string, query: string, contextLines: number, maxResults: number, useRegex: boolean): SearchMatch[] {
-  const lines = readLines(filePath);
-  const pattern = new RegExp(useRegex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-  const matches: SearchMatch[] = [];
+interface SearchResult {
+  matches: SearchMatch[];
+  /** Lines that matched anywhere in the file, not just the ones returned. */
+  occurrences: number;
+  /** How many emitted lines were shortened to MAX_LINE_CHARS. */
+  trimmed: number;
+}
 
-  for (let i = 0; i < lines.length && matches.length < maxResults; i++) {
+/** Per emitted line. A minified bundle is one 1.2M-char line; one match should not ship it. */
+const MAX_LINE_CHARS = 800;
+/** Longer than this is not a search, and complexity scales with length. */
+const MAX_QUERY_CHARS = 200;
+
+/**
+ * Reject the catastrophic-backtracking shapes before running a caller's regex.
+ *
+ * `useRegex: true` hands an agent-authored pattern straight to the engine. On
+ * `(a+)+$` the cost is exponential in the length of the *subject*: measured
+ * 498ms at 22 chars, 1,170ms at 26, 4,829ms at 28. Two things make that worse
+ * than it reads. Blowup happens on lines that do NOT match, so `matches.length`
+ * never rises and no result cap can end the loop — the cost is per line, times
+ * every line in the file. And this server is stdio and single-threaded, so the
+ * whole thing wedges with no way to cancel from the protocol. A timeout cannot
+ * help: the hang is inside a synchronous call that never yields.
+ *
+ * This is a heuristic, not a decision procedure. It catches a quantified group
+ * whose body is itself quantified — the classic family — and deliberately does
+ * not try to catch overlapping alternation like `(a|a)*`. The length cap is the
+ * backstop for what it misses.
+ */
+function unsafePattern(src: string): string | null {
+  if (src.length > MAX_QUERY_CHARS) return `pattern is ${src.length} chars (limit ${MAX_QUERY_CHARS})`;
+  const groupHasQuantifier: boolean[] = [];
+  let escaped = false;
+  let inClass = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (inClass) { if (c === "]") inClass = false; continue; }
+    if (c === "[") { inClass = true; continue; }
+    if (c === "(") { groupHasQuantifier.push(false); continue; }
+    if (c === ")") {
+      const bodyQuantified = groupHasQuantifier.pop() ?? false;
+      const next = src[i + 1];
+      if (bodyQuantified && (next === "*" || next === "+" || next === "{")) {
+        return `nested quantifier near position ${i} — a repeated group whose body also repeats backtracks exponentially`;
+      }
+      if (groupHasQuantifier.length > 0 && (bodyQuantified || next === "*" || next === "+" || next === "{")) {
+        groupHasQuantifier[groupHasQuantifier.length - 1] = true;
+      }
+      continue;
+    }
+    if ((c === "*" || c === "+" || c === "{") && groupHasQuantifier.length > 0) {
+      groupHasQuantifier[groupHasQuantifier.length - 1] = true;
+    }
+  }
+  return null;
+}
+
+/** Shorten a long line around the match, so the window keeps the hit visible. */
+function trimAroundMatch(line: string, pattern: RegExp): { text: string; trimmed: boolean } {
+  if (line.length <= MAX_LINE_CHARS) return { text: line, trimmed: false };
+  const at = line.search(pattern);
+  const from = Math.max(0, (at === -1 ? 0 : at) - Math.floor(MAX_LINE_CHARS / 2));
+  return {
+    text: line.slice(from, from + MAX_LINE_CHARS) +
+      `  [line trimmed to ${MAX_LINE_CHARS} of ${line.length} chars${at === -1 ? "" : `, match at col ${at + 1}`}]`,
+    trimmed: true,
+  };
+}
+
+function searchFile(filePath: string, query: string, contextLines: number, maxResults: number, useRegex: boolean): SearchResult {
+  const lines = readLines(filePath);
+  let pattern: RegExp;
+  if (useRegex) {
+    const unsafe = unsafePattern(query);
+    if (unsafe) throw new Error(`Refusing this regex: ${unsafe}. Search without useRegex, or simplify the pattern.`);
+    try {
+      pattern = new RegExp(query, "i");
+    } catch (e) {
+      throw new Error(`Invalid regex ${JSON.stringify(query)}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  } else {
+    pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  }
+
+  const matches: SearchMatch[] = [];
+  let occurrences = 0;
+  let trimmed = 0;
+
+  // Every line is scanned even once maxResults is reached, so `occurrences` is
+  // the file's real total. Reporting matches.length as the total let 20 mean
+  // "20, and that is all there is" when it meant "20, and the cap stopped me".
+  for (let i = 0; i < lines.length; i++) {
     if (!pattern.test(lines[i])) continue;
+    occurrences++;
+    if (matches.length >= maxResults) continue;
+
     const before = lines.slice(Math.max(0, i - contextLines), i);
     const after = lines.slice(i + 1, Math.min(lines.length, i + contextLines + 1));
 
     const parts: string[] = [];
-    before.forEach((l, j) => parts.push(`  ${String(i - before.length + j + 1).padStart(5)} │ ${l}`));
-    parts.push(`▶ ${String(i + 1).padStart(5)} │ ${lines[i]}`);
-    after.forEach((l, j) => parts.push(`  ${String(i + 2 + j).padStart(5)} │ ${l}`));
+    before.forEach((l, j) => {
+      const t = trimAroundMatch(l, pattern);
+      if (t.trimmed) trimmed++;
+      parts.push(`  ${String(i - before.length + j + 1).padStart(5)} │ ${t.text}`);
+    });
+    const hit = trimAroundMatch(lines[i], pattern);
+    if (hit.trimmed) trimmed++;
+    parts.push(`▶ ${String(i + 1).padStart(5)} │ ${hit.text}`);
+    after.forEach((l, j) => {
+      const t = trimAroundMatch(l, pattern);
+      if (t.trimmed) trimmed++;
+      parts.push(`  ${String(i + 2 + j).padStart(5)} │ ${t.text}`);
+    });
 
     matches.push({ lineNumber: i + 1, line: lines[i], contextBefore: before, contextAfter: after, rendered: parts.join("\n") });
   }
-  return matches;
+  return { matches, occurrences, trimmed };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -392,12 +553,18 @@ server.registerTool(
   },
   async ({ path: filePath, query, contextLines, maxResults, useRegex }) => {
     try {
-      const matches = searchFile(filePath, query, contextLines ?? 5, maxResults ?? 20, useRegex ?? false);
+      const cap = maxResults ?? 20;
+      const { matches, occurrences, trimmed } = searchFile(filePath, query, contextLines ?? 5, cap, useRegex ?? false);
       if (matches.length === 0) {
         return { content: [{ type: "text" as const, text: `No matches found for "${query}" in ${filePath}` }] };
       }
       const text = matches.map((m, i) => `Match ${i + 1} (line ${m.lineNumber}):\n${m.rendered}`).join("\n\n---\n\n");
-      return { content: [{ type: "text" as const, text: `${matches.length} match(es) for "${query}":\n\n${text}` }] };
+      // Say when the cap hid results. "20 match(es)" read as the file's total.
+      const header = occurrences > matches.length
+        ? `${matches.length} of ${occurrences} matching line(s) for "${query}" — raise maxResults to see the rest`
+        : `${occurrences} matching line(s) for "${query}"`;
+      const note = trimmed > 0 ? ` (${trimmed} long line(s) trimmed to ${MAX_LINE_CHARS} chars)` : "";
+      return { content: [{ type: "text" as const, text: `${header}${note}:\n\n${text}` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
     }
@@ -478,32 +645,64 @@ server.registerTool(
 server.registerTool(
   "file_fetch",
   {
-    description: "THE power tool — outline + targeted chunk in one call. Give it a file path and a target (function name, class name, keyword) and get back the full outline AND the exact matching lines. Replaces the outline→search→chunk sequence with a single call. Use this when you know roughly what you want but need both the map and the content in one shot.",
+    description: "Fetch a symbol by name in one call: resolves the name against the file's structure and returns that definition's exact line range and body. Falls back to a text search when the name matches no symbol. Use when you know what you want to read — this replaces outline→find the line→chunk.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),
-      target: z.string().describe("What you're looking for: function name, class name, keyword, or pattern"),
-      contextLines: z.number().optional().default(10).describe("Lines of context around each match (default 10)"),
+      target: z.string().describe("A symbol name (function, class, method, heading) — or any keyword, which falls back to text search"),
+      contextLines: z.number().optional().default(10).describe("Lines of context around each match, search fallback only (default 10)"),
+      maxLines: z.number().optional().default(250).describe("Max body lines to return for a resolved symbol (default 250)"),
     }),
   },
-  async ({ path: filePath, target, contextLines }) => {
+  async ({ path: filePath, target, contextLines, maxLines }) => {
     try {
       const outline = buildOutline(filePath);
-      const matches = searchFile(filePath, target, contextLines ?? 10, 5, false);
+      const header = `FILE: ${path.basename(filePath)}  (${outline.totalLines} lines, ${outline.language})`;
 
-      const parts = [
-        `FILE: ${path.basename(filePath)}  (${outline.totalLines} lines, ${outline.language})`,
-        "",
-        "STRUCTURE:",
-        outline.rendered,
-      ];
+      // Resolve the name against the structure first. The old behaviour printed
+      // the ENTIRE outline on every call and then grep'd for the target, so
+      // asking for one function returned the whole map plus every call site and
+      // docstring mention: 24,980 chars where a plain search answered the same
+      // question in 1,195. Exact ranges exist now, so a name can be addressed
+      // instead of searched.
+      const flat = outline.nodes.flatMap(n => [n, ...n.children]);
+      const hits = flat.filter(n => n.name.toLowerCase() === target.toLowerCase());
 
+      if (hits.length > 1) {
+        const SHOW = 20;
+        const rows = hits.slice(0, SHOW).map(h => `  ${h.kind} ${h.name}  lines ${h.startLine}${h.endLine ? `–${h.endLine}` : ""}`);
+        if (hits.length > SHOW) rows.push(`  … ${hits.length - SHOW} more — narrow the target or use file_outline`);
+        return { content: [{ type: "text" as const, text:
+          [header, "", `"${target}" matches ${hits.length} symbols — fetch one with file_chunk:`, ...rows].join("\n") }] };
+      }
+
+      if (hits.length === 1 && hits[0].endLine) {
+        const n = hits[0];
+        const span = n.endLine! - n.startLine + 1;
+        const cap = maxLines ?? 250;
+        const last = Math.min(n.endLine!, n.startLine + cap - 1);
+        const body = chunkLines(filePath, n.startLine, last);
+        const parts = [
+          header,
+          `SYMBOL: ${n.kind} ${n.name}  lines ${n.startLine}–${n.endLine}  (${span} lines)`,
+          "",
+          body,
+        ];
+        if (last < n.endLine!) {
+          parts.push("", `[showing ${cap} of ${span} lines — continue with file_chunk(start=${last + 1}, end=${n.endLine})]`);
+        }
+        return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+      }
+
+      // No symbol by that name: fall back to search, and include the structure
+      // here — this is the one case where the agent still needs the map.
+      const { matches, occurrences } = searchFile(filePath, target, contextLines ?? 10, 5, false);
+      const parts = [header, "", "STRUCTURE:", outline.rendered];
       if (matches.length > 0) {
-        parts.push("", `MATCHES FOR "${target}":`);
-        matches.forEach((m, i) => {
-          parts.push(`\nMatch ${i + 1} (line ${m.lineNumber}):\n${m.rendered}`);
-        });
+        parts.push("", `"${target}" is not a symbol in this file; ${occurrences} matching line(s) as text:`);
+        matches.forEach((m, i) => parts.push(`\nMatch ${i + 1} (line ${m.lineNumber}):\n${m.rendered}`));
+        if (occurrences > matches.length) parts.push(`\n[${matches.length} of ${occurrences} shown — use file_search with maxResults for the rest]`);
       } else {
-        parts.push("", `No matches found for "${target}"`);
+        parts.push("", `No symbol or text match for "${target}"`);
       }
 
       return { content: [{ type: "text" as const, text: parts.join("\n") }] };

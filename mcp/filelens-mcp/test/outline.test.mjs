@@ -102,7 +102,7 @@ test("typescript: class members render as children of their class", { todo: "out
   assert.match(text, /class Widget[\s\S]*?│\s+[├└]──\s+render\(\)/);
 });
 
-test("the last top-level row does not draw a continuation bar for its children", { todo: "renderer hardcodes │ for child rows" }, async () => {
+test("the last top-level row does not draw a continuation bar for its children", async () => {
   const { text } = await callText("file_outline", { path: PY });
   // `└── class Trailing` is the last top-level row, so its child rows must be
   // indented with spaces, not a `│` continuation bar that leads nowhere.
