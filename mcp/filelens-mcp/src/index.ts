@@ -59,8 +59,44 @@ function assertTextFile(resolved: string): void {
   }
 }
 
+/**
+ * Optional roots the server may read under. Empty means unrestricted.
+ *
+ * This deliberately inverts sitemap's SITEMAP_ALLOW_PRIVATE default, because
+ * the authority is inverted. sitemap's SSRF grants reach the caller does not
+ * otherwise have — the server's network position can touch 169.254.169.254.
+ * Reading a local file grants none: same uid, same files the agent's own shell
+ * already opens. Default-deny here would break ordinary work — this package's
+ * own accuracy corpus is the Python stdlib, which lives outside any project
+ * root, as do node_modules, /nix/store, monorepo siblings and git worktrees —
+ * and it would fail badly: a stdio server cannot prompt, so it would return an
+ * error, the agent would quietly fall back to its own file reader, and the
+ * server would be dead weight nobody notices is inert.
+ *
+ * Set FILELENS_ROOTS (colon-separated) to opt into confinement.
+ */
+const ROOTS = (process.env.FILELENS_ROOTS ?? "")
+  .split(":").map(s => s.trim()).filter(Boolean)
+  .map(r => { try { return fs.realpathSync(path.resolve(r)); } catch { return path.resolve(r); } });
+
+function assertAllowedPath(resolved: string): string {
+  // realpath before comparing: path.resolve plus a string prefix is defeated by
+  // a single symlink pointing out of the root.
+  let real: string;
+  try { real = fs.realpathSync(resolved); } catch { real = resolved; }
+  if (ROOTS.length === 0) return real;
+  const ok = ROOTS.some(root => real === root || real.startsWith(root + path.sep));
+  if (!ok) {
+    throw new Error(
+      `Path is outside FILELENS_ROOTS: ${real}${real === resolved ? "" : ` (via symlink from ${resolved})`}. ` +
+      `Allowed roots: ${ROOTS.join(", ")}. Unset FILELENS_ROOTS to remove the restriction.`
+    );
+  }
+  return real;
+}
+
 function readLines(filePath: string): string[] {
-  const resolved = path.resolve(filePath);
+  const resolved = assertAllowedPath(path.resolve(filePath));
   if (!fs.existsSync(resolved)) throw new Error(`File not found: ${resolved}`);
   if (fs.statSync(resolved).isDirectory()) throw new Error(`Not a file (it is a directory): ${resolved}`);
   assertTextFile(resolved);
@@ -396,7 +432,14 @@ function outlineMarkdown(lines: string[]): OutlineNode[] {
   return nodes;
 }
 
-function buildOutline(filePath: string): { language: string; totalLines: number; nodes: OutlineNode[]; rendered: string } {
+/** Total nodes in a tree, at any depth. */
+function countNodes(nodes: OutlineNode[]): number {
+  return nodes.reduce((n, c) => n + 1 + countNodes(c.children), 0);
+}
+
+interface OutlineOpts { maxRows?: number; offset?: number; depth?: number }
+
+function buildOutline(filePath: string, opts: OutlineOpts = {}): { language: string; totalLines: number; nodes: OutlineNode[]; rendered: string } {
   const lines = readLines(filePath);
   const lang = detectLanguage(filePath);
   let nodes: OutlineNode[] = [];
@@ -406,19 +449,41 @@ function buildOutline(filePath: string): { language: string; totalLines: number;
   else if (lang === "Markdown") nodes = outlineMarkdown(lines);
 
   const parts = [`${path.basename(filePath)}  (${lines.length} lines, ${lang})`];
-  // Recursive: the old renderer walked exactly two levels, so a method inside a
-  // class inside a namespace had nowhere to go even once nesting existed. The
-  // continuation bar belongs to the PARENT's position — children of a last-child
-  // used to be drawn under a `│` that led nowhere.
-  const render = (list: OutlineNode[], indent: string) => {
+
+  // An outline is an INDEX, so it is paginated rather than truncated by
+  // characters: cutting an index mid-way produces a false negative the caller
+  // cannot detect — it does not see a symbol and concludes the symbol does not
+  // exist, having been told it holds the map. Every response therefore says how
+  // many rows exist and how to ask for the rest.
+  const total = countNodes(nodes);
+  const maxRows = opts.maxRows ?? 200;
+  const offset = Math.max(0, opts.offset ?? 0);
+  const maxDepth = opts.depth ?? Infinity;
+  let seen = 0;
+  let shown = 0;
+
+  const render = (list: OutlineNode[], indent: string, depth: number) => {
     list.forEach((n, i) => {
       const isLast = i === list.length - 1;
-      const end = n.endLine ? `–${n.endLine}` : "";
-      parts.push(`${indent}${isLast ? "└──" : "├──"} ${n.kind} ${n.name}  lines ${n.startLine}${end}`);
-      if (n.children.length > 0) render(n.children, `${indent}${isLast ? "    " : "│   "}`);
+      const hidden = depth + 1 > maxDepth && n.children.length > 0;
+      if (seen >= offset && shown < maxRows) {
+        const end = n.endLine ? `–${n.endLine}` : "";
+        const members = hidden ? `  (${countNodes(n.children)} members)` : "";
+        parts.push(`${indent}${isLast ? "└──" : "├──"} ${n.kind} ${n.name}  lines ${n.startLine}${end}${members}`);
+        shown++;
+      }
+      seen++;
+      if (!hidden && n.children.length > 0) render(n.children, `${indent}${isLast ? "    " : "│   "}`, depth + 1);
     });
   };
-  render(nodes, "");
+  render(nodes, "", 1);
+
+  if (offset > 0 || shown < total) {
+    const last = offset + shown;
+    parts.push("", last < total
+      ? `[showing ${shown} of ${total} symbols (rows ${offset + 1}–${last}) — call file_outline with offset=${last} for the rest]`
+      : `[showing ${shown} of ${total} symbols (rows ${offset + 1}–${last})]`);
+  }
 
   const note = parserNote(lang, nodes.length);
   if (note) parts.push("", note);
@@ -594,11 +659,14 @@ server.registerTool(
     description: "Scan a file's structure: classes, functions, headings with line numbers. Always call this first before reading content. Returns a tree-style outline so you know exactly where everything lives before fetching any chunk.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or relative path to the file"),
+      maxRows: z.number().int().positive().optional().default(200).describe("Max symbol rows to return (default 200)"),
+      offset: z.number().int().nonnegative().optional().default(0).describe("Skip this many rows — use the offset the previous response reported"),
+      depth: z.number().int().positive().optional().describe("Only show this many levels; deeper members are summarised as a count"),
     }),
   },
-  async ({ path: filePath }) => {
+  async ({ path: filePath, maxRows, offset, depth }) => {
     try {
-      const outline = buildOutline(filePath);
+      const outline = buildOutline(filePath, { maxRows, offset, depth });
       const text = [
         `FILE: ${path.basename(filePath)}`,
         `LANGUAGE: ${outline.language}`,

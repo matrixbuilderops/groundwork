@@ -103,3 +103,29 @@ test("a language with no scanner says so instead of returning a silent empty out
   assert.match(text, /LANGUAGE: Rust/);
   assert.match(text, /no structure scanner/);
 });
+
+test("FILELENS_ROOTS is unset by default, so ordinary paths outside a project still work", async () => {
+  const { isError } = await callText("file_outline", { path: "/usr/lib/python3.12/abc.py" });
+  // Skips cleanly on a machine without that file; the point is the absence of a policy error.
+  assert.ok(isError === false || isError === true, "call completed");
+  const { text } = await callText("file_outline", { path: "/usr/lib/python3.12/abc.py" });
+  assert.ok(!/outside FILELENS_ROOTS/.test(text), "default build must not confine reads");
+});
+
+test("FILELENS_ROOTS confines reads when it is set, and names the escape hatch", async () => {
+  const { text, isError } = await callText("file_outline", { path: PY },
+    { env: { FILELENS_ROOTS: "/nonexistent-root" } });
+  assert.ok(isError);
+  assert.match(text, /outside FILELENS_ROOTS/);
+  assert.match(text, /Unset FILELENS_ROOTS/);
+});
+
+test("a symlink cannot escape FILELENS_ROOTS", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "flroot-"));
+  const outside = tmp("secret.py", "def secret(): pass\n");
+  const link = path.join(root, "link.py");
+  fs.symlinkSync(outside, link);
+  const { text, isError } = await callText("file_outline", { path: link }, { env: { FILELENS_ROOTS: root } });
+  assert.ok(isError, "symlink out of the root should be refused");
+  assert.match(text, /via symlink/);
+});

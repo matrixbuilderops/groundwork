@@ -133,3 +133,29 @@ test("a class nested inside a try/if block is still found", async () => {
   const topLevel = text.split("\n").filter(l => /^[├└]──/.test(l)).map(l => l.replace(/\s+lines.*$/, ""));
   assert.ok(!topLevel.some(l => /render|load|size/.test(l)), `members leaked to top level: ${topLevel.join(" | ")}`);
 });
+
+test("a large outline is paginated with a resumable footer, never silently cut", async () => {
+  const { text } = await callText("file_outline", { path: PY, maxRows: 3 });
+  assert.match(text, /\[showing 3 of \d+ symbols \(rows 1–3\) — call file_outline with offset=3/);
+});
+
+test("the offset the footer names actually continues the listing", async () => {
+  const first = await callText("file_outline", { path: PY, maxRows: 3 });
+  const second = await callText("file_outline", { path: PY, maxRows: 3, offset: 3 });
+  const rows = t => t.split("\n").filter(l => /lines \d+/.test(l));
+  const a = rows(first.text), b = rows(second.text);
+  assert.ok(a.length > 0 && b.length > 0);
+  assert.notDeepEqual(a, b, "offset returned the same page");
+  assert.match(second.text, /rows 4–6/);
+});
+
+test("depth collapses members to a count instead of dropping them silently", async () => {
+  const { text } = await callText("file_outline", { path: PY, depth: 1 });
+  assert.match(text, /class Container[^\n]*\(\d+ members\)/);
+  assert.ok(!/def first/.test(text), "depth=1 should not list members");
+});
+
+test("a small file gets no pagination footer at all", async () => {
+  const { text } = await callText("file_outline", { path: TS });
+  assert.ok(!/showing \d+ of/.test(text), "footer shown when everything fit");
+});
