@@ -20,7 +20,7 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 
-const server = new McpServer({ name: "filelens", version: "0.3.0" });
+const server = new McpServer({ name: "filelens", version: "0.4.0" });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers

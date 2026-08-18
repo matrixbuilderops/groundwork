@@ -1,6 +1,6 @@
 {
   "name": "sitemap-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server \u2014 website awareness for AI agents. Fetch, search, and map sites without raw HTML noise.",
   "type": "module",
   "scripts": {

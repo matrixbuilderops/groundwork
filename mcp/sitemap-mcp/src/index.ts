@@ -20,7 +20,7 @@ import { z } from "zod";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-const server = new McpServer({ name: "sitemap", version: "0.3.0" });
+const server = new McpServer({ name: "sitemap", version: "0.4.0" });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Destination policy
