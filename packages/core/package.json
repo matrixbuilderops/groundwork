@@ -1,0 +1,48 @@
+{
+  "name": "@groundwork/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Structure-first extraction engine \u2014 recovers a page's data model from embedded JSON and repeated templates.",
+  "main": "./build/index.js",
+  "types": "./build/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "default": "./build/index.js"
+    }
+  },
+  "files": [
+    "build"
+  ],
+  "scripts": {
+    "build": "tsc && chmod 755 build/cli.js",
+    "test": "node --test \"test/*.test.mjs\"",
+    "pretest": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "agent",
+    "html",
+    "extraction",
+    "scraping",
+    "structured-data"
+  ],
+  "author": "matrixbuilderops",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matrixbuilderops/groundwork.git",
+    "directory": "packages/core"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "groundwork-extract": "./build/cli.js"
+  }
+}
