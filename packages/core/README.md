@@ -56,6 +56,35 @@ the output rather than an internal.
 The two SPAs returning nothing is the honest answer, not a failure: neither ships
 server-rendered content, so only level 3 can read them.
 
+## Code outlines
+
+`detectLanguage` in filelens names 28 extensions; its `buildOutline` dispatches
+on four. A `.rs` file therefore reported `LANGUAGE: Rust`, a line count, and zero
+symbols — indistinguishable from a Rust file that defines nothing.
+
+This package adds scanners for the rest: **Go, Rust, Java, C, C++, C#, Ruby,
+Shell**. `outlineCode` returns `null` when no scanner exists, so callers can keep
+saying "nothing parsed this" rather than "this defines nothing".
+
+Validated against real source on disk, not fixtures:
+
+```
+sph_echo.c          1,033 lines   28 symbols   (ground truth: 28)
+DmiReader.cpp         136 lines    6 symbols   (ground truth: 6)
+lib.rs                219 lines   14 symbols   nested mod > impl > fn
+build_api_docs.rb     238 lines   10 symbols
+authorizer_test.go    472 lines    2 symbols   (the file has one top-level func)
+```
+
+Three defects only real files exposed:
+
+- **C splits declarations across lines.** `static void` on one line, the name and
+  arguments on the next. A single-line regex found 0 of 28 functions.
+- **Trailing qualifiers.** `toJSON(...) const {` — looking for `{` immediately
+  after `)` missed every const method.
+- **Constructor initialiser lists.** `: m_a(a), m_b(b)` is an identifier, a
+  balanced argument list, and then a brace, so `m_a` was reported as a function.
+
 ## Use
 
 ```bash

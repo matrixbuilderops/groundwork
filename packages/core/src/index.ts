@@ -6,3 +6,5 @@ export { detectTemplates, templateBytes } from "./template.js";
 export type { Template, Field, DetectOptions } from "./template.js";
 export { extract, requiresAuth } from "./extract.js";
 export type { Extraction, Level, ExtractOptions } from "./extract.js";
+export { outlineCode, outlineBraces, outlineRuby, outlineShell, blankLine, countNodes, SCANNED_LANGUAGES } from "./code.js";
+export type { OutlineNode, DeclPattern, BlankState } from "./code.js";
