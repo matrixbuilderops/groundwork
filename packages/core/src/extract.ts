@@ -20,6 +20,15 @@ import { detectTemplates, Template, DetectOptions } from "./template.js";
 
 export type Level = 1 | 2;
 
+/**
+ * What kind of page this is.
+ *
+ * A blog post containing one six-row table is not an index, and reporting its
+ * table as "the answer" tells the caller the article is that table. The records
+ * are still worth returning — the page-level claim is what has to be honest.
+ */
+export type PageKind = "index" | "document" | "empty";
+
 export interface Extraction {
   url: string;
   title: string;
@@ -35,6 +44,10 @@ export interface Extraction {
   requiresAuth: boolean;
   /** Plain text, kept so callers can fall back to prose. */
   text: string;
+  /** index = records are the content; document = read `text` instead. */
+  kind: PageKind;
+  /** Confidence of the best template, 0–1. Level 1 is definitional, so 1. */
+  confidence: number;
 }
 
 /**
@@ -101,10 +114,25 @@ export function extract(html: string, url = "", opts: ExtractOptions = {}): Extr
   else if (templateFields > 0) level = 2;
   else if (harvestFields > 0) level = 1;
 
+  const top = templates[0];
+  const coverage = top?.coverage ?? 0;
+  const confidence = level === 1 ? 1 : top?.confidence ?? 0;
+
+  // An index is a page whose records *are* its content. The threshold is on
+  // share-of-text rather than record count, because thirty nav links and thirty
+  // search results are indistinguishable by count alone.
+  const kind: PageKind =
+    level === 1 ? "index"
+    : level === 2 && coverage >= 0.25 ? "index"
+    : text.length > 500 ? "document"
+    : "empty";
+
   return {
     url,
     title: extractTitle(html),
     level,
+    kind,
+    confidence,
     sources: level === 1 ? [...new Set(harvested.map(h => h.label))]
            : level === 2 ? templates.map(t => t.selector)
            : [],

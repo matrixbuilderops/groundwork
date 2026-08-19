@@ -142,3 +142,37 @@ test("a bot challenge with almost no text is an auth wall", () => {
   const wall = `<html><body><h1>Checking your browser before accessing</h1></body></html>`;
   assert.equal(extract(wall).requiresAuth, true);
 });
+
+// ── region and confidence: furniture that variance cannot catch ──────────────
+test("a nav menu with varied labels is chrome, not content", () => {
+  const menu = `<nav class="burger"><ul>
+    ${["Home","News","Sport","Culture","Jobs"].map(x=>`<li class="item"><a href="/${x}">${x}</a></li>`).join("")}
+  </ul></nav>`;
+  const t = detectTemplates(parse(menu));
+  assert.equal(t.length, 0, "varied nav labels must still be rejected by region");
+});
+
+test("the same markup inside <main> is content", () => {
+  const rows = ["Alpha","Beta","Gamma","Delta","Epsilon"]
+    .map(x=>`<li class="item"><a href="/${x}">${x}</a><span class="p">${x.length}</span></li>`).join("");
+  const page = `<main><ul>${rows}</ul></main>`;
+  const [t] = detectTemplates(parse(page));
+  assert.ok(t, "content-region repeats should survive");
+  assert.equal(t.region, "content");
+  assert.ok(t.confidence > 0.3);
+});
+
+test("a prose page with a small table is a document, not an index", () => {
+  const prose = "Long form writing that carries the meaning of the page. ".repeat(120);
+  const table = `<table>${[1,2,3,4,5,6].map(i=>`<tr><td>r${i}</td><td>v${i}</td></tr>`).join("")}</table>`;
+  const r = extract(`<html><body><article><p>${prose}</p>${table}</article></body></html>`);
+  assert.equal(r.kind, "document", "prose dominates, so the table is not the answer");
+});
+
+test("a listing page is an index", () => {
+  const rows = Array.from({length:20},(_,i)=>
+    `<li class="res"><h3><a href="/i/${i}">Result number ${i}</a></h3><p class="d">Description ${i}</p></li>`).join("");
+  const r = extract(`<html><body><main><ul>${rows}</ul></main></body></html>`);
+  assert.equal(r.kind, "index");
+  assert.equal(r.level, 2);
+});

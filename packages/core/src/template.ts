@@ -14,6 +14,30 @@
 
 import { Node, descendants, innerText, attrValue } from "./html.js";
 
+// ── where a template sits ────────────────────────────────────────────────────
+// Variance separates data from *identical* furniture, but a navigation menu has
+// varied labels and sails straight through it — on lemonde.fr the burger menu
+// outranked the news. Position is the signal variance cannot supply: page
+// furniture lives in nav/header/footer/aside, content lives in main/article.
+
+const CHROME_ANCESTORS = new Set(["nav", "header", "footer", "aside"]);
+const CONTENT_ANCESTORS = new Set(["main", "article"]);
+const CHROME_ROLES = new Set(["navigation", "banner", "contentinfo", "search", "menu", "menubar"]);
+const CHROME_WORDS = /\b(nav|navbar|navigation|menu|burger|sidebar|breadcrumb|footer|header|toolbar|pagination|social|share|cookie|consent|skip-link)\b/i;
+
+export type Region = "content" | "chrome" | "unknown";
+
+function regionOf(n: Node): Region {
+  for (let p: Node | null = n; p; p = p.parent) {
+    if (CHROME_ANCESTORS.has(p.tag)) return "chrome";
+    const role = attrValue(p.attrs, "role").toLowerCase();
+    if (CHROME_ROLES.has(role)) return "chrome";
+    if (p.cls.some(c => CHROME_WORDS.test(c)) || CHROME_WORDS.test(p.id)) return "chrome";
+    if (CONTENT_ANCESTORS.has(p.tag) || role === "main") return "content";
+  }
+  return "unknown";
+}
+
 export interface Field {
   /** Path from the record root, e.g. `h3>a` — unambiguous, if ugly. */
   path: string;
@@ -31,7 +55,13 @@ export interface Template {
   count: number;
   fields: Field[];
   records: Array<Record<string, string>>;
-  /** count × fields, used to rank competing templates. */
+  /** Whether this sits in page content or page furniture. */
+  region: Region;
+  /** Share of the page's total text this template accounts for, 0–1. */
+  coverage: number;
+  /** 0–1. Low means "found something, do not trust it" — emit, never hide. */
+  confidence: number;
+  /** Ranking key, region- and coverage-weighted. */
   score: number;
 }
 
@@ -102,6 +132,8 @@ export interface DetectOptions {
   minVariance?: number;
   maxTemplates?: number;
   maxRecords?: number;
+  /** Drop templates the engine does not trust. */
+  minConfidence?: number;
 }
 
 /**
@@ -109,11 +141,13 @@ export interface DetectOptions {
  * best first.
  */
 export function detectTemplates(root: Node, opts: DetectOptions = {}): Template[] {
+  const totalText = innerText(root).length;
   const minCount = opts.minCount ?? 3;
   const minFill = opts.minFill ?? 0.5;
   const minVariance = opts.minVariance ?? 0.3;
   const maxTemplates = opts.maxTemplates ?? 5;
   const maxRecords = opts.maxRecords ?? 200;
+  const minConfidence = opts.minConfidence ?? 0.3;
 
   const groups: Node[][] = [];
   const collect = (parent: Node) => {
@@ -165,12 +199,22 @@ export function detectTemplates(root: Node, opts: DetectOptions = {}): Template[
     }).filter(r => Object.keys(r).length > 0);
     if (!records.length) continue;
 
+    const region = regionOf(members[0]);
+    const bytes = records.reduce((n, r) => n + Object.values(r).join(" ").length, 0);
+    const coverage = totalText > 0 ? Math.min(1, bytes / totalText) : 0;
+
+    // Confidence is deliberately harsh on chrome. A nav menu can have perfect
+    // fill and variance; what it cannot have is a large share of the page's text
+    // while sitting inside <main>.
+    const regionWeight = region === "content" ? 1 : region === "unknown" ? 0.6 : 0.15;
+    const confidence = Math.min(1,
+      regionWeight * (0.35 + 0.4 * coverage + 0.25 * bestVariance));
+
     templates.push({
       selector: shortSelector(members[0]),
       count: group.length,
-      fields,
-      records,
-      score: group.length * fields.length,
+      fields, records, region, coverage, confidence,
+      score: group.length * fields.length * regionWeight * (0.5 + coverage),
     });
   }
 
@@ -180,7 +224,10 @@ export function detectTemplates(root: Node, opts: DetectOptions = {}): Template[
     const prior = best.get(t.selector);
     if (!prior || t.score > prior.score) best.set(t.selector, t);
   }
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, maxTemplates);
+  return [...best.values()]
+    .filter(t => t.confidence >= minConfidence)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxTemplates);
 }
 
 /** Total text length across a template's records — used to compare with prose. */

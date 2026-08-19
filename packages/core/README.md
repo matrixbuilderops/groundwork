@@ -27,17 +27,34 @@ Cost-ordered. The first rung that answers wins.
 Levels 3 and 4 need a browser and live in `packages/browser`. This package owns
 1 and 2, and sets `requiresAuth` when a page needs the rungs above.
 
-Measured over five live pages: level 1 answered 1 of 5, level 2 answered 4 of 5,
-together 5 of 5. Neither is sufficient alone — that is why it is a ladder.
+Neither rung is sufficient alone — that is why it is a ladder.
+
+## Measured
+
+Twelve live pages, chosen to include cases meant to break it:
 
 ```
-                       raw HTML    as prose   answered by   fields
-news.ycombinator.com     35 KB       4.1 KB     level 2        522
-bbc.com/news            383 KB      10.5 KB     level 1      2,877
-pypi.org/project/requests 182 KB    12.1 KB     level 2        596
-github.com/…/anthropic-sdk-python 317 KB 4.6 KB level 2        223
-developer.mozilla.org/…/Headers   292 KB 48.2 KB level 2        948
+                          level  kind      conf   top template
+crates.io                 —      empty     0.00   — (SPA, needs level 3)
+excalidraw.com            —      empty     0.00   — (SPA, needs level 3)
+example.com               —      empty     0.00   —
+wikipedia.org/…/HTTP      2      document  0.68   li×70
+react.dev/learn           2      index     0.82   div.max-w-4xl×6      ← weak
+lemonde.fr                2      document  0.64   section.autopromo__item×8
+simonwillison.net/…       2      document  0.42   tr×6
+news.ycombinator.com      2      index     0.60   tr×31
+github.com/…/sdk-python   2      index     0.80   tr.react-directory-row×16
+pypi.org/project/requests 2      index     0.83   div.release×161
+openlibrary.org/search    2      index     1.00   li.searchResultItem×20
+bbc.com/news              1      index     1.00   ld+json + __NEXT_DATA__
 ```
+
+Eleven of twelve are classified correctly. `react.dev/learn` is a documentation
+page reported as an index — a real miss, and the reason `confidence` is part of
+the output rather than an internal.
+
+The two SPAs returning nothing is the honest answer, not a failure: neither ships
+server-rendered content, so only level 3 can read them.
 
 ## Use
 
