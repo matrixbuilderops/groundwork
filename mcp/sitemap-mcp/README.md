@@ -65,3 +65,45 @@ site_awareness("https://example.com", maxPages=10)
 ## Part of groundwork
 
 [github.com/matrixbuilderops/groundwork](https://github.com/matrixbuilderops/groundwork) — the foundational awareness layer for AI agents. Pair with [filelens-mcp](https://www.npmjs.com/package/filelens-mcp) for intelligent file reading.
+
+---
+
+## Security Features
+
+sitemap-mcp includes comprehensive security hardening against adversarial attacks:
+
+- **Navigation Budget Enforcement**: Prevents infinite crawls with configurable page limits
+- **Same-Origin Policy**: Blocks cross-origin navigation and external redirects
+- **Timeout Protection**: Configurable timeouts prevent hanging on slow/unresponsive sites
+- **Memory Safety**: Handles large websites without exhausting system resources
+- **ReDoS Protection**: Safe regex patterns resistant to catastrophic backtracking
+- **Stack Overflow Resistance**: Deep DOM trees handled safely without recursion limits
+
+---
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd mcp/sitemap-mcp
+npm test
+```
+
+This runs both core functionality tests and adversarial security tests to ensure robustness.
+
+---
+
+## File structure
+
+```
+mcp/sitemap-mcp/
+├── src/
+│   ├── index.ts          # MCP server entry point
+│   └── tools.ts          # Tool implementations (site_search_page, site_fetch_page, etc.)
+├── tests/
+│   ├── sitemap-mcp.test.ts      # Core functionality tests
+│   └── adversarial.test.ts      # Security and edge case tests
+├── package.json
+└── README.md
+```

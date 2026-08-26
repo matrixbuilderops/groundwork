@@ -130,6 +130,51 @@ playwright install chromium
 
 ---
 
+## Security Features
+
+SiteMap includes comprehensive security hardening against adversarial attacks:
+
+- **Navigation Budget Enforcement**: Prevents infinite crawls with configurable page limits
+- **Same-Origin Policy**: Blocks cross-origin navigation and external redirects
+- **Timeout Protection**: Configurable timeouts prevent hanging on slow/unresponsive sites
+- **Memory Safety**: Handles large websites without exhausting system resources
+- **ReDoS Protection**: Safe regex patterns resistant to catastrophic backtracking
+- **Stack Overflow Resistance**: Deep DOM trees handled safely without recursion limits
+
+---
+
+## File structure
+
+```
+sitemap/
+├── src/
+│   ├── __init__.py      # Exports SiteMap, SiteAwarenessObject
+│   ├── sitemap.py       # Main entry point — SiteMap.build()
+│   ├── models.py        # Pydantic models: SiteAwarenessObject, Page, Form, Action
+│   ├── crawler.py       # Playwright-based route discovery
+│   ├── parser.py        # DOM → forms, actions, auth detection
+│   └── extractor.py     # HTML → clean Markdown, API hint detection
+├── tests/
+│   ├── test_sitemap.py         # Core functionality tests
+│   └── test_adversarial.py     # Security and edge case tests
+└── pyproject.toml
+```
+
+---
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd sitemap
+pytest tests/ -v
+```
+
+This runs both core functionality tests and adversarial security tests to ensure robustness.
+
+---
+
 ## Also in this repo
 
 **[FileLens](../filelens/)** does for files what SiteMap does for websites.

@@ -118,3 +118,48 @@ language plus the absence of content, never language alone.
 
 [PolyForm Noncommercial 1.0.0](LICENSE) — free for noncommercial use.
 Commercial use requires a paid license: matrixbuilderops@proton.me
+
+---
+
+## Security Features
+
+@groundwork/core includes comprehensive security hardening against adversarial attacks:
+
+- **Template Detection Safety**: Prevents ReDoS attacks via malicious HTML patterns
+- **Memory Bounds**: Handles pages with massive repeated structures without exhaustion
+- **JSON Parsing Hardening**: Safely extracts embedded JSON from untrusted sources
+- **Stack Overflow Resistance**: Deep DOM trees processed iteratively, not recursively
+- **Input Validation**: All HTML inputs sanitized before processing
+- **Confidence Scoring**: Prevents false positives from adversarial page structures
+
+---
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd packages/core
+npm test
+```
+
+This runs both core functionality tests and adversarial security tests to ensure robustness.
+
+---
+
+## File structure
+
+```
+packages/core/
+├── src/
+│   ├── index.ts          # Main entry point — extract()
+│   ├── extraction.ts     # Extraction object, templates, confidence scoring
+│   ├── json.ts           # Embedded JSON detection (ld+json, NEXT_DATA, etc.)
+│   ├── template.ts       # Template detection and record extraction
+│   └── outline.ts        # Code outline scanners for 28 languages
+├── tests/
+│   ├── core.test.ts      # Core functionality tests
+│   └── adversarial.test.ts # Security and edge case tests
+├── package.json
+└── README.md
+```
