@@ -1,7 +1,7 @@
 {
   "name": "sitemap-mcp",
-  "version": "0.5.0",
-  "description": "MCP server \u2014 website awareness for AI agents. Fetch, search, and map sites without raw HTML noise.",
+  "version": "0.6.0",
+  "description": "MCP server — website awareness for AI agents. Fetch, search, and map sites without raw HTML noise.",
   "type": "module",
   "scripts": {
     "build": "tsc && chmod 755 build/index.js",
@@ -12,19 +12,8 @@
   "bin": {
     "sitemap-mcp": "./build/index.js"
   },
-  "files": [
-    "build"
-  ],
-  "keywords": [
-    "mcp",
-    "ai",
-    "web",
-    "crawler",
-    "sitemap",
-    "llm",
-    "agent",
-    "tools"
-  ],
+  "files": ["build", "README.md", "LICENSE"],
+  "keywords": ["mcp", "ai", "web", "crawler", "sitemap", "llm", "agent", "tools"],
   "author": "matrixbuilderops",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
