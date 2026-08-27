@@ -70,3 +70,45 @@ Outline + first 40 lines + last 20 lines in one call. Use when you've never seen
 ## Part of groundwork
 
 [github.com/matrixbuilderops/groundwork](https://github.com/matrixbuilderops/groundwork) — the foundational awareness layer for AI agents. Pair with [sitemap-mcp](https://www.npmjs.com/package/sitemap-mcp) for website awareness.
+
+---
+
+## Security Features
+
+filelens-mcp includes comprehensive security hardening against adversarial attacks:
+
+- **Path Traversal Protection**: Blocks attempts to access files outside allowed directories
+- **Symlink Safety**: Detects and rejects symbolic links to sensitive system files
+- **Unicode Handling**: Safely processes files with surrogate characters and invalid UTF-8
+- **Massive File Support**: Tested with files containing 1M+ characters and 10K+ lines
+- **Injection Resistance**: Protected against code injection via strings and comments
+- **ReDoS Protection**: Safe regex patterns resistant to catastrophic backtracking
+
+---
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd mcp/filelens-mcp
+npm test
+```
+
+This runs both core functionality tests and adversarial security tests to ensure robustness.
+
+---
+
+## File structure
+
+```
+mcp/filelens-mcp/
+├── src/
+│   ├── index.ts          # MCP server entry point
+│   └── tools.ts          # Tool implementations (file_fetch, file_outline, etc.)
+├── tests/
+│   ├── filelens-mcp.test.ts      # Core functionality tests
+│   └── adversarial.test.ts       # Security and edge case tests
+├── package.json
+└── README.md
+```
