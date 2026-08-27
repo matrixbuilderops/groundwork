@@ -136,6 +136,19 @@ outline()          ← What's in here? Where does everything live?
 
 ---
 
+## Security Features
+
+FileLens includes comprehensive security hardening against adversarial attacks:
+
+- **Path Traversal Protection**: Blocks attempts to access files outside allowed directories
+- **Symlink Safety**: Detects and rejects symbolic links to sensitive system files
+- **Unicode Handling**: Safely processes files with surrogate characters and invalid UTF-8
+- **Massive File Support**: Tested with files containing 1M+ characters and 10K+ lines
+- **Injection Resistance**: Protected against code injection via strings and comments
+- **ReDoS Protection**: Safe regex patterns resistant to catastrophic backtracking
+
+---
+
 ## File structure
 
 ```
@@ -147,7 +160,8 @@ filelens/
 │   ├── search.py       # Keyword + regex search with context
 │   └── summarize.py    # Outline + head + tail summary
 ├── tests/
-│   └── test_filelens.py
+│   ├── test_filelens.py        # Core functionality tests
+│   └── test_adversarial.py     # Security and edge case tests
 └── pyproject.toml
 ```
 
@@ -168,3 +182,16 @@ Instead of dumping raw HTML into an AI's context, SiteMap crawls a URL and
 returns a structured Site Awareness Object — every page, form, button, and
 API endpoint — so the AI can navigate and interact with the site without
 ever seeing raw HTML. Same principle, different data source.
+
+---
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd filelens
+pytest tests/ -v
+```
+
+This runs both core functionality tests and adversarial security tests to ensure robustness.
