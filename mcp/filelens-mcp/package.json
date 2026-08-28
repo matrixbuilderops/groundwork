@@ -1,11 +1,11 @@
 {
   "name": "filelens-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP server — intelligent file reading for AI agents. Collapses outline→search→chunk into single tool calls.",
   "type": "module",
   "scripts": {
     "build": "tsc && chmod 755 build/index.js",
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --test test/*.test.mjs",
     "test:corpus": "node test/corpus.mjs",
     "pretest": "npm run build",
     "prepublishOnly": "npm run build && npm test"
@@ -13,8 +13,20 @@
   "bin": {
     "filelens-mcp": "./build/index.js"
   },
-  "files": ["build", "README.md", "LICENSE"],
-  "keywords": ["mcp", "ai", "file-reading", "llm", "agent", "tools", "filelens"],
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "ai",
+    "file-reading",
+    "llm",
+    "agent",
+    "tools",
+    "filelens"
+  ],
   "author": "matrixbuilderops",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
