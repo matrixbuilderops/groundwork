@@ -1,0 +1,45 @@
+{
+  "name": "verifier-mcp",
+  "version": "1.0.0",
+  "description": "MCP server & NPX tool for Verifier — deterministic EU e-invoice compliance engine and paradox resolver.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && chmod 755 build/index.js",
+    "test": "node --test test/*.test.mjs",
+    "pretest": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "bin": {
+    "verifier-mcp": "./build/index.js",
+    "verifier": "./build/index.js"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "compliance",
+    "e-invoice",
+    "audit-trail",
+    "paradox-resolver",
+    "nutrient-dws",
+    "ai-agent",
+    "deterministic-verification"
+  ],
+  "author": "matrixbuilderops",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

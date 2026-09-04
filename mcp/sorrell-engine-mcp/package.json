@@ -1,0 +1,44 @@
+{
+  "name": "sorrell-engine-mcp",
+  "version": "1.0.0",
+  "description": "MCP server & NPX runner for Sorrell Engine — browser-native neural operating system and tiny model swarm (WebMCP).",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && chmod 755 build/index.js",
+    "test": "node --test test/*.test.mjs",
+    "pretest": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "bin": {
+    "sorrell-engine-mcp": "./build/index.js",
+    "sorrell-engine": "./build/index.js"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "webmcp",
+    "tiny-models",
+    "model-swarm",
+    "browser-native",
+    "ai-agent",
+    "code-generation"
+  ],
+  "author": "matrixbuilderops",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "pypi": [
+    "cli-enforcement",
+    "cli-wikia",
+    "cli-collective",
+    "cli-fleet"
+  ],
+  "npm": [
+    "starforge-cli",
+    "sitemap-mcp",
+    "filelens-mcp",
+    "starreckon",
+    "verifier-mcp",
+    "sorrell-engine-mcp"
+  ]
+}
