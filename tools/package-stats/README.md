@@ -14,9 +14,15 @@ Master Package Telemetry & Download Engine for PyPI (`pip`) and NPM (`npx`) pack
 # Run telemetry report
 package-stats
 
+# Run detailed report (includes second table listing what each program does)
+package-stats-detailed
+# or:
+package-stats --detailed
+
 # Add / remove packages from monitoring
 package-stats --add-npm <package-name>
 package-stats --add-pip <package-name>
+package-stats --set-desc <package-name> "<description>"
 package-stats --list
 
 # Output raw JSON

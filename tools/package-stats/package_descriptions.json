@@ -1,0 +1,12 @@
+{
+  "cli-enforcement": "Model-agnostic hook-level behavioral enforcement engine for AI coding agents.",
+  "cli-wikia": "Offline, pip-installable reference wiki & search index for AI CLIs (Claude, Gemini, Copilot, DeepSeek).",
+  "cli-collective": "The Collective bundle: knowledge (cli-wikia) + control (cli-enforcement) + parallel execution (cli-fleet).",
+  "cli-fleet": "Hardware-aware parallel Claude Code agent orchestration via shared filesystem mailboxes.",
+  "starforge-cli": "Verification CLI auditing AI-coding telemetry with kernel-enforced no-egress proof.",
+  "sitemap-mcp": "MCP server providing website structural awareness without HTML token explosion.",
+  "filelens-mcp": "MCP server for single-call intelligent AST & structural file reading.",
+  "starreckon": "Local-only developer wrapped analyzer for disk logs (Claude Code, Cowork, Codex).",
+  "verifier-mcp": "Deterministic EU e-invoice compliance engine and paradox resolver (DevNetwork 2026).",
+  "sorrell-engine-mcp": "Browser-native neural OS & Tiny Model Swarm runtime (OpenAI WebMCP Challenge)."
+}

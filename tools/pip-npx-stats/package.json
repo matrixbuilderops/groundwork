@@ -1,0 +1,40 @@
+{
+  "name": "pip-npx-stats",
+  "version": "1.0.0",
+  "description": "Cross-registry package telemetry engine for PyPI (pip) and NPM (npx) packages.",
+  "type": "module",
+  "main": "./src/telemetry.mjs",
+  "bin": {
+    "pip-npx-stats": "bin/cli.mjs",
+    "pip-npx-stats-detailed": "bin/cli.mjs",
+    "pip-and-npx-package-stats": "bin/cli.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "packages.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pypi",
+    "npm",
+    "pip",
+    "npx",
+    "telemetry",
+    "package-stats",
+    "downloads",
+    "metrics",
+    "analytics"
+  ],
+  "author": "Alexander Sorrell (matrixbuilderops)",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matrixbuilderops/groundwork.git",
+    "directory": "tools/pip-npx-stats"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

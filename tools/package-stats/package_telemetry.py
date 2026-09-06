@@ -16,6 +16,7 @@ import json
 import ssl
 import time
 import argparse
+import textwrap
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -67,6 +68,30 @@ def save_config(cfg, custom_path=None):
     cfg_file = custom_path or CONFIG_PATH
     with open(cfg_file, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+
+
+def load_descriptions(config=None, custom_dir=None):
+    """Load package descriptions dynamically from config or descriptions file.
+    Does NOT hardcode descriptions - purely data-driven from file."""
+    base_dir = custom_dir or SCRIPT_DIR
+    descriptions = {}
+
+    # 1. Load from packages_config.json if "descriptions" key exists
+    if isinstance(config, dict) and "descriptions" in config and isinstance(config["descriptions"], dict):
+        descriptions.update(config["descriptions"])
+
+    # 2. Load from package_descriptions.json if present
+    desc_path = os.path.join(base_dir, "package_descriptions.json")
+    if os.path.exists(desc_path):
+        try:
+            with open(desc_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    descriptions.update(data)
+        except Exception:
+            pass
+
+    return descriptions
 
 
 def load_cached_telemetry():
@@ -195,6 +220,7 @@ def get_pypi_stats(pkg_name, cached_pkg=None):
     latest_ver = "N/A"
     latest_date = "N/A"
     total_releases = 0
+    api_desc = ""
 
     if "_error" not in pypi_data:
         releases = pypi_data.get("releases", {})
@@ -214,12 +240,14 @@ def get_pypi_stats(pkg_name, cached_pkg=None):
         elif version_dates:
             latest_date, _ = version_dates[-1]
         total_releases = len(version_dates)
+        api_desc = pypi_data.get("info", {}).get("summary") or ""
     elif cached_pkg:
         first_ver = cached_pkg.get("first_version", "N/A")
         first_date = cached_pkg.get("first_date", "N/A")
         latest_ver = cached_pkg.get("current_version", "N/A")
         latest_date = cached_pkg.get("current_date", "N/A")
         total_releases = cached_pkg.get("total_releases", 0)
+        api_desc = cached_pkg.get("description", "")
 
     # 2. Fetch daily downloads from pypistats API
     stats_url = f"https://pypistats.org/api/packages/{pkg_name}/overall"
@@ -266,6 +294,7 @@ def get_pypi_stats(pkg_name, cached_pkg=None):
         "downloads_lifetime": lifetime,
         "downloads_stale": stale,
         "downloads_error": dl_error,
+        "description": api_desc,
         "url": f"https://pypi.org/project/{pkg_name}/"
     }
 
@@ -280,6 +309,7 @@ def get_npm_stats(pkg_name, cached_pkg=None):
     latest_ver = "N/A"
     latest_date = "N/A"
     total_releases = 0
+    api_desc = ""
 
     if "_error" not in npm_data:
         time_map = npm_data.get("time", {})
@@ -290,6 +320,14 @@ def get_npm_stats(pkg_name, cached_pkg=None):
         latest_ver = npm_data.get("dist-tags", {}).get("latest", "N/A")
         latest_date = time_map.get(latest_ver, time_map.get("modified", "N/A"))[:10]
         total_releases = len(versions)
+        api_desc = npm_data.get("description") or ""
+    elif cached_pkg:
+        first_ver = cached_pkg.get("first_version", "N/A")
+        first_date = cached_pkg.get("first_date", "N/A")
+        latest_ver = cached_pkg.get("current_version", "N/A")
+        latest_date = cached_pkg.get("current_date", "N/A")
+        total_releases = cached_pkg.get("total_releases", 0)
+        api_desc = cached_pkg.get("description", "")
 
     # 2. Fetch full download range
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -332,6 +370,7 @@ def get_npm_stats(pkg_name, cached_pkg=None):
         "downloads_lifetime": lifetime,
         "downloads_stale": stale,
         "downloads_error": dl_error,
+        "description": api_desc,
         "url": f"https://www.npmjs.com/package/{pkg_name}"
     }
 
@@ -360,6 +399,8 @@ def compute_metrics(config):
     pypi_pkgs = config.get("pypi", [])
     npm_pkgs = config.get("npm", [])
 
+    descriptions = load_descriptions(config)
+
     cached = load_cached_telemetry() or {}
     cached_pypi = {p.get("package"): p for p in cached.get("pypi", []) if isinstance(p, dict)}
     cached_npm = {p.get("package"): p for p in cached.get("npm", []) if isinstance(p, dict)}
@@ -368,10 +409,16 @@ def compute_metrics(config):
     results_npm = []
 
     for pkg in pypi_pkgs:
-        results_pypi.append(get_pypi_stats(pkg, cached_pkg=cached_pypi.get(pkg)))
+        st = get_pypi_stats(pkg, cached_pkg=cached_pypi.get(pkg))
+        if pkg in descriptions and descriptions[pkg]:
+            st["description"] = descriptions[pkg]
+        results_pypi.append(st)
 
     for pkg in npm_pkgs:
-        results_npm.append(get_npm_stats(pkg, cached_pkg=cached_npm.get(pkg)))
+        st = get_npm_stats(pkg, cached_pkg=cached_npm.get(pkg))
+        if pkg in descriptions and descriptions[pkg]:
+            st["description"] = descriptions[pkg]
+        results_npm.append(st)
 
     summary_pypi = calc_group(results_pypi)
     summary_npm = calc_group(results_npm)
@@ -389,7 +436,58 @@ def compute_metrics(config):
     }
 
 
-def print_table(data):
+def print_detailed_table(data):
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    YELLOW = "\033[33m"
+    MAGENTA = "\033[35m"
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+
+    border = "=" * 111
+    sep = "─" * 111
+
+    print(f"\n{BOLD}{CYAN}{border}{RESET}")
+    print(f"                                      {BOLD}PROGRAM DIRECTORY & WHAT THEY DO{RESET}")
+    print(f"{BOLD}{CYAN}{border}{RESET}")
+
+    all_rows = []
+    for r in data.get("pypi", []):
+        all_rows.append(("pip", r["package"], r.get("description") or "(No description provided in config file)"))
+    for r in data.get("npm", []):
+        all_rows.append(("npx", r["package"], r.get("description") or "(No description provided in config file)"))
+
+    max_pkg_len = max([len(r[1]) for r in all_rows], default=19)
+    pkg_width = max(19, max_pkg_len)
+    desc_width = max(60, 111 - 6 - 3 - pkg_width - 3)
+
+    headers = ["Type", "Package", "What It Does / Architecture"]
+    hdr_str = f"{headers[0]:<6} │ {headers[1]:<{pkg_width}} │ {headers[2]}"
+    print(f"{BOLD}{hdr_str}{RESET}")
+    print(f"{DIM}{sep}{RESET}")
+
+    prev_type = None
+    for r_type, pkg, desc in all_rows:
+        if prev_type and prev_type != r_type:
+            print(f"{DIM}{sep}{RESET}")
+        prev_type = r_type
+
+        t_color = YELLOW if r_type == "pip" else MAGENTA
+        p_color = CYAN
+        lines = textwrap.wrap(desc, width=desc_width) or [""]
+        for i, line in enumerate(lines):
+            if i == 0:
+                t_col = f"{t_color}{r_type:<6}{RESET}"
+                p_col = f"{p_color}{pkg:<{pkg_width}}{RESET}"
+            else:
+                t_col = " " * 6
+                p_col = " " * pkg_width
+            print(f"{t_col} │ {p_col} │ {line}")
+
+    print(f"{BOLD}{CYAN}{border}{RESET}")
+
+
+def print_table(data, detailed=False):
     BOLD = "\033[1m"
     CYAN = "\033[36m"
     GREEN = "\033[32m"
@@ -528,6 +626,9 @@ def print_table(data):
 
     print(f"{BOLD}{CYAN}==============================================================================================================={RESET}")
 
+    if detailed:
+        print_detailed_table(data)
+
     stale = [r for r in data["pypi"] + data["npm"] if r.get("downloads_stale")]
     if stale:
         errs = sorted({r["downloads_error"] for r in stale if r.get("downloads_error")})
@@ -539,13 +640,28 @@ def print_table(data):
     for reason in data.get("persist_blockers", []):
         print(f"{YELLOW}  ! {reason} — results not saved to cache.{RESET}")
 
-    print(f"{DIM}Config: {CONFIG_PATH}  •  Output: {OUTPUT_JSON}{RESET}\n")
+    mode_hint = "  •  Detailed mode: package-stats-detailed (or --detailed)" if not detailed else ""
+    print(f"{DIM}Config: {CONFIG_PATH}  •  Output: {OUTPUT_JSON}{mode_hint}{RESET}\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Master Package Telemetry & Download Calculator (PyPI & NPM)")
+    prog_name = os.path.basename(sys.argv[0])
+    is_detailed_prog = prog_name in ("package-stats-detailed", "package_telemetry_detailed.py")
+
+    # Support "package-stats detailed" subcommand syntax
+    if len(sys.argv) > 1 and sys.argv[1] == "detailed":
+        sys.argv.pop(1)
+        is_detailed_prog = True
+
+    parser = argparse.ArgumentParser(
+        prog=prog_name,
+        description="Master Package Telemetry & Download Calculator (PyPI & NPM)"
+    )
+    parser.add_argument("-d", "--detailed", action="store_true", help="Display second table listing all programs and what they do")
     parser.add_argument("--add-pip", "--add-pypi", dest="add_pip", type=str, help="Add a PyPI package to packages_config.json")
     parser.add_argument("--add-npm", "--add-npx", dest="add_npm", type=str, help="Add an NPM package to packages_config.json")
+    parser.add_argument("--desc", type=str, help="Optional description when adding a package via --add-pip or --add-npm")
+    parser.add_argument("--set-desc", nargs=2, metavar=("PACKAGE", "DESCRIPTION"), help="Set or update description for a package in packages_config.json")
     parser.add_argument("--remove-pip", "--remove-pypi", dest="remove_pip", type=str, help="Remove a PyPI package from config")
     parser.add_argument("--remove-npm", "--remove-npx", dest="remove_npm", type=str, help="Remove an NPM package from config")
     parser.add_argument("--list", action="store_true", help="List monitored packages in packages_config.json")
@@ -555,10 +671,25 @@ def main():
     args = parser.parse_args()
     config = load_config()
 
+    is_detailed = is_detailed_prog or args.detailed
+
+    if args.set_desc:
+        pkg, desc = args.set_desc
+        if "descriptions" not in config:
+            config["descriptions"] = {}
+        config["descriptions"][pkg] = desc
+        save_config(config)
+        print(f"Updated description for '{pkg}' in {CONFIG_PATH}.")
+        return
+
     if args.add_pip:
         pkg = args.add_pip.strip()
         if pkg not in config["pypi"]:
             config["pypi"].append(pkg)
+            if args.desc:
+                if "descriptions" not in config:
+                    config["descriptions"] = {}
+                config["descriptions"][pkg] = args.desc
             save_config(config)
             print(f"Added PyPI package '{pkg}' to {CONFIG_PATH}.")
         else:
@@ -569,6 +700,10 @@ def main():
         pkg = args.add_npm.strip()
         if pkg not in config["npm"]:
             config["npm"].append(pkg)
+            if args.desc:
+                if "descriptions" not in config:
+                    config["descriptions"] = {}
+                config["descriptions"][pkg] = args.desc
             save_config(config)
             print(f"Added NPM package '{pkg}' to {CONFIG_PATH}.")
         else:
@@ -579,6 +714,8 @@ def main():
         pkg = args.remove_pip.strip()
         if pkg in config["pypi"]:
             config["pypi"].remove(pkg)
+            if "descriptions" in config and pkg in config["descriptions"]:
+                del config["descriptions"][pkg]
             save_config(config)
             print(f"Removed PyPI package '{pkg}' from {CONFIG_PATH}.")
         else:
@@ -589,6 +726,8 @@ def main():
         pkg = args.remove_npm.strip()
         if pkg in config["npm"]:
             config["npm"].remove(pkg)
+            if "descriptions" in config and pkg in config["descriptions"]:
+                del config["descriptions"][pkg]
             save_config(config)
             print(f"Removed NPM package '{pkg}' from {CONFIG_PATH}.")
         else:
@@ -623,7 +762,7 @@ def main():
     if args.output_json_stdout:
         print(json.dumps(data, indent=2))
     else:
-        print_table(data)
+        print_table(data, detailed=is_detailed)
 
 
 if __name__ == "__main__":

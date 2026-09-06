@@ -1,0 +1,4 @@
+node_modules/
+package_telemetry_latest.json
+.DS_Store
+*.tgz
