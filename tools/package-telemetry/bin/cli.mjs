@@ -54,24 +54,22 @@ CONFIG MANAGEMENT:
   -h, --help                 Show this help message
 
 CONFIGURATION FILE (packages.json):
-  The JSON file is divided into "pip" and "npm" sections:
+  The JSON file is divided into "pip" and "npx" (or "npm") sections:
 
   {
     "pip": [
-      "requests",
-      "fastapi"
+      "cli-enforcement"
     ],
-    "npm": [
-      "express",
-      "chalk"
+    "npx": [
+      "filelens-mcp"
     ],
     "descriptions": {
-      "requests": "A simple, elegant HTTP library for Python.",
-      "express": "Fast, unopinionated, minimalist web framework for Node.js."
+      "cli-enforcement": "Model-agnostic hook-level behavioral enforcement engine for AI coding agents.",
+      "filelens-mcp": "MCP server for single-call intelligent AST & structural file reading."
     }
   }
 
-  • Add ANY package to "pip" or "npm" and the engine automatically picks it up!
+  • Add ANY package to "pip" or "npx" and the engine automatically picks it up!
   • "descriptions" is optional. If omitted, the engine automatically extracts
     the live summary directly from the PyPI or NPM registry metadata.
 
@@ -154,18 +152,14 @@ async function main() {
     } else {
       const template = {
         pip: [
-          'requests',
-          'fastapi'
+          'cli-enforcement'
         ],
-        npm: [
-          'express',
-          'chalk'
+        npx: [
+          'filelens-mcp'
         ],
         descriptions: {
-          'requests': 'A simple, elegant HTTP library for Python.',
-          'fastapi': 'High performance web framework for building APIs with Python.',
-          'express': 'Fast, unopinionated, minimalist web framework for Node.js.',
-          'chalk': 'Terminal string styling done right.'
+          'cli-enforcement': 'Model-agnostic hook-level behavioral enforcement engine for AI coding agents.',
+          'filelens-mcp': 'MCP server for single-call intelligent AST & structural file reading.'
         }
       };
       saveConfig(template, targetPath);

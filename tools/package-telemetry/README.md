@@ -26,24 +26,19 @@ npx package-telemetry --detailed
 
 ## Configuration File (`packages.json`)
 
-The configuration file is divided into `pip` and `npm` arrays:
+The configuration file is divided into `pip` and `npx` (or `npm`) arrays:
 
 ```json
 {
   "pip": [
-    "requests",
-    "fastapi"
+    "cli-enforcement"
   ],
-  "npm": [
-    "express",
-    "chalk",
-    "zod"
+  "npx": [
+    "filelens-mcp"
   ],
   "descriptions": {
-    "requests": "A simple, elegant HTTP library for Python.",
-    "fastapi": "High performance web framework for building APIs with Python.",
-    "express": "Fast, unopinionated, minimalist web framework for Node.js.",
-    "zod": "TypeScript-first schema validation with static type inference."
+    "cli-enforcement": "Model-agnostic hook-level behavioral enforcement engine for AI coding agents.",
+    "filelens-mcp": "MCP server for single-call intelligent AST & structural file reading."
   }
 }
 ```

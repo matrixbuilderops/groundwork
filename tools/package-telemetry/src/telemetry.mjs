@@ -337,9 +337,12 @@ export function loadConfig(configPath) {
   } catch {}
 
   return {
-    pip: ['cli-enforcement', 'cli-wikia', 'cli-collective', 'cli-fleet'],
-    npm: ['starforge-cli', 'sitemap-mcp', 'filelens-mcp', 'starreckon', 'verifier-mcp', 'sorrell-engine-mcp'],
-    descriptions: {}
+    pip: ['cli-enforcement'],
+    npx: ['filelens-mcp'],
+    descriptions: {
+      'cli-enforcement': 'Model-agnostic hook-level behavioral enforcement engine for AI coding agents.',
+      'filelens-mcp': 'MCP server for single-call intelligent AST & structural file reading.'
+    }
   };
 }
 
