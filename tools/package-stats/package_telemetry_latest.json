@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-06T02:41:52.266746",
+  "timestamp": "2026-09-06T02:47:12.151550",
   "pypi": [
     {
       "registry": "PyPI (pip)",
@@ -175,7 +175,7 @@
     },
     {
       "registry": "NPM (npx)",
-      "package": "pip-npx-stats",
+      "package": "package-telemetry",
       "first_version": "v1.0.0",
       "first_date": "2026-09-06",
       "current_version": "v1.0.0",
@@ -187,8 +187,8 @@
       "downloads_lifetime": 0,
       "downloads_stale": false,
       "downloads_error": "HTTP 404: Not Found",
-      "description": "Cross-registry package telemetry engine for PyPI (pip) and NPM (npx) packages.",
-      "url": "https://www.npmjs.com/package/pip-npx-stats"
+      "description": "Cross-registry package telemetry engine for tracking PyPI and NPM package metrics, releases, and downloads.",
+      "url": "https://www.npmjs.com/package/package-telemetry"
     }
   ],
   "summary": {

@@ -1,13 +1,12 @@
 {
-  "name": "pip-npx-stats",
+  "name": "package-telemetry",
   "version": "1.0.0",
-  "description": "Cross-registry package telemetry engine for PyPI (pip) and NPM (npx) packages.",
+  "description": "Cross-registry package telemetry engine for tracking PyPI and NPM package metrics, releases, and downloads.",
   "type": "module",
   "main": "./src/telemetry.mjs",
   "bin": {
-    "pip-npx-stats": "bin/cli.mjs",
-    "pip-npx-stats-detailed": "bin/cli.mjs",
-    "pip-and-npx-package-stats": "bin/cli.mjs"
+    "package-telemetry": "./bin/cli.mjs",
+    "package-telemetry-detailed": "./bin/cli.mjs"
   },
   "files": [
     "bin",
@@ -17,22 +16,20 @@
     "LICENSE"
   ],
   "keywords": [
-    "pypi",
-    "npm",
-    "pip",
-    "npx",
+    "package-telemetry",
     "telemetry",
-    "package-stats",
-    "downloads",
+    "npm-stats",
+    "download-stats",
     "metrics",
-    "analytics"
+    "analytics",
+    "developer-tools"
   ],
   "author": "Alexander Sorrell (matrixbuilderops)",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/matrixbuilderops/groundwork.git",
-    "directory": "tools/pip-npx-stats"
+    "directory": "tools/package-telemetry"
   },
   "engines": {
     "node": ">=18"

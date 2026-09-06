@@ -9,5 +9,5 @@
   "starreckon": "Local-only developer wrapped analyzer for disk logs (Claude Code, Cowork, Codex).",
   "verifier-mcp": "Deterministic EU e-invoice compliance engine and paradox resolver (DevNetwork 2026).",
   "sorrell-engine-mcp": "Browser-native neural OS & Tiny Model Swarm runtime (OpenAI WebMCP Challenge).",
-  "pip-npx-stats": "Cross-registry package telemetry engine for PyPI (pip) and NPM (npx) packages."
+  "package-telemetry": "Cross-registry package telemetry engine for tracking PyPI and NPM package metrics, releases, and downloads."
 }

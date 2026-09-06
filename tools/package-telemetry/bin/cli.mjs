@@ -12,12 +12,12 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const SCRIPT_NAME = path.basename(process.argv[1] || 'pip-npx-stats');
+const SCRIPT_NAME = path.basename(process.argv[1] || 'package-telemetry');
 
 function printHelp() {
   console.log(`
 ================================================================================
-                                 pip-npx-stats
+                               package-telemetry
      Cross-Registry Package Telemetry Engine for PyPI (pip) & NPM (npx)
 ================================================================================
 
@@ -34,7 +34,7 @@ MODES:
                              Descriptions are loaded from the "descriptions" section
                              of packages.json, or automatically fetched from the
                              package's live registry summary if omitted.
-                             (Shortcut: run directly as \`pip-npx-stats-detailed\`)
+                             (Shortcut: run directly as \`package-telemetry-detailed\`)
 
   --json                     Output calculated telemetry metrics as JSON to stdout.
 
@@ -77,22 +77,22 @@ CONFIGURATION FILE (packages.json):
 
 EXAMPLES:
   # Run standard telemetry dashboard
-  npx pip-npx-stats
+  npx package-telemetry
 
   # Run detailed mode (includes second table listing what each program does)
-  npx pip-npx-stats --detailed
+  npx package-telemetry --detailed
   # or:
-  npx pip-npx-stats-detailed
+  npx package-telemetry-detailed
 
   # Initialize a new packages.json in your current folder
-  npx pip-npx-stats --init
+  npx package-telemetry --init
 
   # Add packages directly from the command line
-  npx pip-npx-stats --add-pip flask --desc "Lightweight WSGI web application framework"
-  npx pip-npx-stats --add-npm zod --desc "TypeScript-first schema validation"
+  npx package-telemetry --add-pip flask --desc "Lightweight WSGI web application framework"
+  npx package-telemetry --add-npm zod --desc "TypeScript-first schema validation"
 
   # Output raw JSON to pipe into jq or save to disk
-  npx pip-npx-stats --json > metrics.json
+  npx package-telemetry --json > metrics.json
 `);
 }
 
