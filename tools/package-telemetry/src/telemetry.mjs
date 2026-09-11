@@ -136,13 +136,16 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     apiDesc = cachedPkg.description || '';
   }
 
-  // Fetch daily downloads from pypistats API
+  // Fetch daily downloads from pypistats overall API
   const statsUrl = `https://pypistats.org/api/packages/${pkgName}/overall`;
   const statsData = await fetchJson(statsUrl, 3, 100);
 
   let lifetime = 0;
   let perMonth = 0;
-  let perDay = 0;
+  let lastDayDl = 0;
+  let lastDayDate = 'N/A';
+  let todayDl = 0;
+  const todayStr = new Date().toISOString().slice(0, 10);
   const daysActive = firstDate !== 'N/A' ? calculateDaysBetween(firstDate) : 1;
 
   if (!statsData._error && Array.isArray(statsData.data)) {
@@ -155,7 +158,24 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
       lifetime = withMirrors.reduce((sum, d) => sum + (d.downloads || 0), 0);
       const last30 = withMirrors.slice(-30);
       perMonth = last30.reduce((sum, d) => sum + (d.downloads || 0), 0);
-      perDay = daysActive > 0 ? Math.round((lifetime / daysActive) * 10) / 10 : 0;
+
+      // Check if today's date exists in registry
+      const todayEntries = withMirrors.filter(d => d.date === todayStr);
+      if (todayEntries.length > 0) {
+        todayDl = todayEntries[0].downloads || 0;
+      }
+
+      // Last finalized completed day (strictly before today)
+      const pastEntries = withMirrors.filter(d => (d.date || '') < todayStr);
+      if (pastEntries.length > 0) {
+        const lastEntry = pastEntries[pastEntries.length - 1];
+        lastDayDl = lastEntry.downloads || 0;
+        lastDayDate = lastEntry.date || 'N/A';
+      } else {
+        const lastEntry = withMirrors[withMirrors.length - 1];
+        lastDayDl = lastEntry.downloads || 0;
+        lastDayDate = lastEntry.date || 'N/A';
+      }
     }
   }
 
@@ -164,7 +184,9 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
   if (lifetime === 0 && cachedPkg && (cachedPkg.downloads_lifetime || 0) > 0) {
     lifetime = cachedPkg.downloads_lifetime || 0;
     perMonth = cachedPkg.downloads_per_month || 0;
-    perDay = daysActive > 0 ? Math.round((lifetime / daysActive) * 10) / 10 : (cachedPkg.downloads_per_day || 0);
+    lastDayDl = cachedPkg.downloads_last_day || cachedPkg.downloads_per_day || 0;
+    lastDayDate = cachedPkg.downloads_last_day_date || 'N/A';
+    todayDl = cachedPkg.downloads_current_day || 0;
     stale = true;
   }
 
@@ -179,7 +201,11 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     current_date: latestDate,
     days_live: daysActive,
     total_releases: totalReleases,
-    downloads_per_day: perDay,
+    downloads_last_day: lastDayDl,
+    downloads_last_day_date: lastDayDate,
+    downloads_current_day: todayDl,
+    downloads_current_day_date: todayStr,
+    downloads_per_day: lastDayDl,
     downloads_per_month: perMonth,
     downloads_lifetime: lifetime,
     downloads_stale: stale,
@@ -229,17 +255,41 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
 
   let lifetime = 0;
   let perMonth = 0;
-  let perDay = 0;
+  let lastDayDl = 0;
+  let lastDayDate = 'N/A';
+  let todayDl = 0;
   const daysActive = firstDate !== 'N/A' ? calculateDaysBetween(firstDate) : 1;
 
   if (!dlData._error && Array.isArray(dlData.downloads)) {
-    const list = dlData.downloads;
+    let list = dlData.downloads;
+    if (firstDate !== 'N/A') {
+      list = list.filter(d => (d.day || '') >= firstDate);
+    }
     if (list.length > 0) {
       lifetime = list.reduce((sum, d) => sum + (d.downloads || 0), 0);
+
+      // Check if today's date exists in range
+      const todayEntries = list.filter(d => d.day === todayStr);
+      if (todayEntries.length > 0) {
+        todayDl = todayEntries[0].downloads || 0;
+      }
+
+      // 30-day sum from range
       const last30 = list.slice(-30);
       perMonth = last30.reduce((sum, d) => sum + (d.downloads || 0), 0);
-      perDay = daysActive > 0 ? Math.round((lifetime / daysActive) * 10) / 10 : 0;
     }
+  }
+
+  // Fetch official last-day / last-month from npm point API
+  const dlDayData = await fetchJson(`https://api.npmjs.org/downloads/point/last-day/${pkgName}`, 3, 50);
+  if (!dlDayData._error) {
+    lastDayDl = dlDayData.downloads || 0;
+    lastDayDate = dlDayData.end || 'N/A';
+  }
+
+  const dlMonthData = await fetchJson(`https://api.npmjs.org/downloads/point/last-month/${pkgName}`, 3, 50);
+  if (!dlMonthData._error && (dlMonthData.downloads || 0) > 0) {
+    perMonth = dlMonthData.downloads || 0;
   }
 
   const dlError = dlData._error || null;
@@ -247,7 +297,9 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
   if (lifetime === 0 && cachedPkg && (cachedPkg.downloads_lifetime || 0) > 0) {
     lifetime = cachedPkg.downloads_lifetime || 0;
     perMonth = cachedPkg.downloads_per_month || 0;
-    perDay = daysActive > 0 ? Math.round((lifetime / daysActive) * 10) / 10 : (cachedPkg.downloads_per_day || 0);
+    lastDayDl = cachedPkg.downloads_last_day || cachedPkg.downloads_per_day || 0;
+    lastDayDate = cachedPkg.downloads_last_day_date || 'N/A';
+    todayDl = cachedPkg.downloads_current_day || 0;
     stale = true;
   }
 
@@ -262,7 +314,11 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
     current_date: latestDate,
     days_live: daysActive,
     total_releases: totalReleases,
-    downloads_per_day: perDay,
+    downloads_last_day: lastDayDl,
+    downloads_last_day_date: lastDayDate,
+    downloads_current_day: todayDl,
+    downloads_current_day_date: todayStr,
+    downloads_per_day: lastDayDl,
     downloads_per_month: perMonth,
     downloads_lifetime: lifetime,
     downloads_stale: stale,
@@ -279,26 +335,35 @@ export function calcGroup(items) {
       count: 0,
       total_lifetime: 0,
       total_month: 0,
+      total_last_day: 0,
+      total_current_day: 0,
       total_day: 0,
       avg_lifetime: 0,
       avg_month: 0,
+      avg_last_day: 0,
+      avg_current_day: 0,
       avg_day: 0,
       avg_days_live: 0
     };
   }
   const totLife = items.reduce((s, i) => s + (i.downloads_lifetime || 0), 0);
   const totMonth = items.reduce((s, i) => s + (i.downloads_per_month || 0), 0);
-  const totDay = items.reduce((s, i) => s + (i.downloads_per_day || 0), 0);
+  const totLast = items.reduce((s, i) => s + (i.downloads_last_day ?? i.downloads_per_day ?? 0), 0);
+  const totCur = items.reduce((s, i) => s + (i.downloads_current_day || 0), 0);
   const totDays = items.reduce((s, i) => s + (i.days_live || 0), 0);
 
   return {
     count: n,
     total_lifetime: totLife,
     total_month: totMonth,
-    total_day: Math.round(totDay * 10) / 10,
+    total_last_day: totLast,
+    total_current_day: totCur,
+    total_day: Math.round(totLast * 10) / 10,
     avg_lifetime: Math.round((totLife / n) * 10) / 10,
     avg_month: Math.round((totMonth / n) * 10) / 10,
-    avg_day: Math.round((totDay / n) * 10) / 10,
+    avg_last_day: Math.round((totLast / n) * 10) / 10,
+    avg_current_day: Math.round((totCur / n) * 10) / 10,
+    avg_day: Math.round((totLast / n) * 10) / 10,
     avg_days_live: Math.round((totDays / n) * 10) / 10
   };
 }
@@ -429,11 +494,11 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
   const RESET = '\x1b[0m';
   const DIM = '\x1b[2m';
 
-  const headers = ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'DL / Day', 'DL / Month', 'Lifetime DL'];
-  const widths = [6, 17, 10, 11, 10, 11, 10, 10, 12, 13];
-  const tableWidth = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1); // 127
-  const border = '='.repeat(tableWidth);
-  const sepLine = '─'.repeat(tableWidth);
+  const headers = ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'Today', 'DL / Month', 'Lifetime DL'];
+  const widths = [6, 17, 10, 11, 10, 11, 10, 10, 8, 12, 13];
+  const bannerWidth = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1); // 148
+  const border = '='.repeat(bannerWidth);
+  const sepLine = '─'.repeat(bannerWidth);
 
   function formatRow(cols, colors = [], isBold = false) {
     const res = [];
@@ -448,9 +513,16 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
     return res.join(' │ ');
   }
 
+  function centerText(txt, width) {
+    const space = Math.max(0, width - txt.length);
+    const padL = Math.floor(space / 2);
+    const padR = space - padL;
+    return ' '.repeat(padL) + txt + ' '.repeat(padR);
+  }
+
   let out = '';
   out += `\n${BOLD}${CYAN}${border}${RESET}\n`;
-  out += `                                   ${BOLD}ALEXANDER SORRELL — PACKAGE METRICS & TELEMETRY${RESET}\n`;
+  out += `${BOLD}${centerText('ALEXANDER SORRELL — PACKAGE METRICS & TELEMETRY', bannerWidth)}${RESET}\n`;
   out += `${BOLD}${CYAN}${border}${RESET}\n`;
 
   out += `${BOLD}${formatRow(headers)}${RESET}\n`;
@@ -458,6 +530,8 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
 
   // PyPI Rows
   for (const r of data.pypi || []) {
+    const curVal = r.downloads_current_day || 0;
+    const lastVal = r.downloads_last_day ?? r.downloads_per_day ?? 0;
     const cols = [
       'pip',
       r.package + (r.downloads_stale ? ' ~' : ''),
@@ -466,11 +540,13 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
       r.current_version,
       r.current_date,
       `${r.days_live}d`,
-      r.downloads_per_day.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+      lastVal.toLocaleString(),
+      curVal.toLocaleString(),
       r.downloads_per_month.toLocaleString(),
       r.downloads_lifetime.toLocaleString()
     ];
-    const colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, GREEN, BOLD + GREEN];
+    const curColor = curVal === 0 ? DIM : GREEN;
+    const colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, curColor, GREEN, BOLD + GREEN];
     out += `${formatRow(cols, colors)}\n`;
   }
 
@@ -478,6 +554,8 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
 
   // NPM Rows
   for (const r of data.npm || []) {
+    const curVal = r.downloads_current_day || 0;
+    const lastVal = r.downloads_last_day ?? r.downloads_per_day ?? 0;
     const cols = [
       'npx',
       r.package + (r.downloads_stale ? ' ~' : ''),
@@ -486,25 +564,27 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
       r.current_version,
       r.current_date,
       `${r.days_live}d`,
-      r.downloads_per_day.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+      lastVal.toLocaleString(),
+      curVal.toLocaleString(),
       r.downloads_per_month.toLocaleString(),
       r.downloads_lifetime.toLocaleString()
     ];
-    const colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, GREEN, BOLD + GREEN];
+    const curColor = curVal === 0 ? DIM : GREEN;
+    const colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, curColor, GREEN, BOLD + GREEN];
     out += `${formatRow(cols, colors)}\n`;
   }
 
   // Summary Table
   out += `${BOLD}${CYAN}${border}${RESET}\n`;
-  out += `${BOLD}                                              AVERAGES & SUMMARY${RESET}\n`;
+  out += `${BOLD}${centerText('AVERAGES & SUMMARY', bannerWidth)}${RESET}\n`;
   out += `${BOLD}${CYAN}${border}${RESET}\n`;
 
   const pSum = data.summary.pypi;
   const nSum = data.summary.npm;
   const aSum = data.summary.all;
 
-  const sumHeaders = ['Category', 'Packages', 'Avg Days Live', 'Avg DL / Day', 'Avg DL / Month', 'Avg Lifetime / Pkg', 'Total Lifetime DL'];
-  const sumWidths = [16, 10, 14, 14, 16, 20, 18];
+  const sumHeaders = ['Category', 'Packages', 'Avg Days Live', 'Avg Last Day', 'Avg Today', 'Avg DL / Month', 'Avg Lifetime / Pkg', 'Total Lifetime DL'];
+  const sumWidths = [16, 10, 14, 14, 12, 16, 20, 25];
 
   function formatSumRow(cols, colors = [], isBold = false) {
     const res = [];
@@ -523,44 +603,53 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
   out += `${BOLD}${formatSumRow(sumHeaders)}${RESET}\n`;
   out += `${DIM}${sumSep}${RESET}\n`;
 
+  const pLast = pSum.avg_last_day ?? pSum.avg_day ?? 0;
+  const pCur = pSum.avg_current_day ?? 0;
   out += `${formatSumRow([
     'PyPI (pip)',
     `${pSum.count} pkgs`,
     `${pSum.avg_days_live}d`,
-    `${pSum.avg_day.toLocaleString(undefined, { minimumFractionDigits: 1 })} / day`,
-    `${pSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1 })} / mo`,
-    `${pSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1 })} / pkg`,
+    `${pLast.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
+    `${pCur.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
+    `${pSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / mo`,
+    `${pSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / pkg`,
     pSum.total_lifetime.toLocaleString()
-  ], [YELLOW, DIM, YELLOW, GREEN, GREEN, CYAN, BOLD + GREEN])}\n`;
+  ], [YELLOW, DIM, YELLOW, GREEN, pCur === 0 ? DIM : GREEN, GREEN, CYAN, BOLD + GREEN])}\n`;
 
+  const nLast = nSum.avg_last_day ?? nSum.avg_day ?? 0;
+  const nCur = nSum.avg_current_day ?? 0;
   out += `${formatSumRow([
     'NPM (npx)',
     `${nSum.count} pkgs`,
     `${nSum.avg_days_live}d`,
-    `${nSum.avg_day.toLocaleString(undefined, { minimumFractionDigits: 1 })} / day`,
-    `${nSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1 })} / mo`,
-    `${nSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1 })} / pkg`,
+    `${nLast.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
+    `${nCur.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
+    `${nSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / mo`,
+    `${nSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / pkg`,
     nSum.total_lifetime.toLocaleString()
-  ], [MAGENTA, DIM, YELLOW, GREEN, GREEN, CYAN, BOLD + GREEN])}\n`;
+  ], [MAGENTA, DIM, YELLOW, GREEN, nCur === 0 ? DIM : GREEN, GREEN, CYAN, BOLD + GREEN])}\n`;
 
   out += `${DIM}${sumSep}${RESET}\n`;
 
+  const aLast = aSum.avg_last_day ?? aSum.avg_day ?? 0;
+  const aCur = aSum.avg_current_day ?? 0;
   out += `${formatSumRow([
     'ALL ECOSYSTEM',
     `${aSum.count} pkgs`,
     `${aSum.avg_days_live}d`,
-    `${aSum.avg_day.toLocaleString(undefined, { minimumFractionDigits: 1 })} / day`,
-    `${aSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1 })} / mo`,
-    `${aSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1 })} / pkg`,
+    `${aLast.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
+    `${aCur.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
+    `${aSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / mo`,
+    `${aSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / pkg`,
     aSum.total_lifetime.toLocaleString()
-  ], [BOLD + CYAN, BOLD, BOLD + YELLOW, BOLD + GREEN, BOLD + GREEN, BOLD + CYAN, BOLD + GREEN], true)}\n`;
+  ], [BOLD + CYAN, BOLD, BOLD + YELLOW, BOLD + GREEN, aCur === 0 ? BOLD + DIM : BOLD + GREEN, BOLD + GREEN, BOLD + CYAN, BOLD + GREEN], true)}\n`;
 
   out += `${BOLD}${CYAN}${border}${RESET}\n`;
 
   // Detailed Second Table: What They Do
   if (detailed) {
     out += `\n${BOLD}${CYAN}${border}${RESET}\n`;
-    out += `                                      ${BOLD}PROGRAM DIRECTORY & WHAT THEY DO${RESET}\n`;
+    out += `${BOLD}${centerText('PROGRAM DIRECTORY & WHAT THEY DO', bannerWidth)}${RESET}\n`;
     out += `${BOLD}${CYAN}${border}${RESET}\n`;
 
     const allRows = [];
@@ -573,7 +662,7 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
 
     const maxPkgLen = Math.max(19, ...allRows.map(r => r[1].length));
     const pkgWidth = maxPkgLen;
-    const descWidth = Math.max(60, tableWidth - 6 - 3 - pkgWidth - 3);
+    const descWidth = Math.max(60, bannerWidth - 6 - 3 - pkgWidth - 3);
 
     out += `${BOLD}${'Type'.padEnd(6)} │ ${'Package'.padEnd(pkgWidth)} │ What It Does / Architecture${RESET}\n`;
     out += `${DIM}${sepLine}${RESET}\n`;

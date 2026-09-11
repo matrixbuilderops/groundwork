@@ -249,13 +249,16 @@ def get_pypi_stats(pkg_name, cached_pkg=None):
         total_releases = cached_pkg.get("total_releases", 0)
         api_desc = cached_pkg.get("description", "")
 
-    # 2. Fetch daily downloads from pypistats API
+    # 2. Fetch lifetime & daily downloads from pypistats overall API
     stats_url = f"https://pypistats.org/api/packages/{pkg_name}/overall"
     stats_data = fetch_json(stats_url, delay=0.25)
 
     lifetime = 0
     per_month = 0
-    per_day = 0
+    last_day_dl = 0
+    last_day_date = "N/A"
+    today_dl = 0
+    today_str = datetime.now().strftime("%Y-%m-%d")
     days_active = calculate_days_between(first_date) if first_date != "N/A" else 1
 
     if "_error" not in stats_data:
@@ -269,15 +272,31 @@ def get_pypi_stats(pkg_name, cached_pkg=None):
             lifetime = sum(d.get("downloads", 0) for d in with_mirrors)
             last_30 = with_mirrors[-30:] if len(with_mirrors) >= 30 else with_mirrors
             per_month = sum(d.get("downloads", 0) for d in last_30)
-            per_day = round(lifetime / days_active, 1) if days_active > 0 else 0
-    
+
+            # Check if today's date exists in registry
+            today_entries = [d for d in with_mirrors if d.get("date") == today_str]
+            if today_entries:
+                today_dl = today_entries[0].get("downloads", 0)
+
+            # Last finalized completed day (strictly before today)
+            past_entries = [d for d in with_mirrors if d.get("date", "") < today_str]
+            if past_entries:
+                last_day_entry = past_entries[-1]
+                last_day_dl = last_day_entry.get("downloads", 0)
+                last_day_date = last_day_entry.get("date", "N/A")
+            elif with_mirrors:
+                last_day_dl = with_mirrors[-1].get("downloads", 0)
+                last_day_date = with_mirrors[-1].get("date", "N/A")
+
     # Fallback to cached downloads if live pypistats API failed or rate-limited
     dl_error = stats_data.get("_error")
     stale = False
     if lifetime == 0 and cached_pkg and cached_pkg.get("downloads_lifetime", 0) > 0:
         lifetime = cached_pkg.get("downloads_lifetime", 0)
         per_month = cached_pkg.get("downloads_per_month", 0)
-        per_day = round(lifetime / days_active, 1) if days_active > 0 else cached_pkg.get("downloads_per_day", 0)
+        last_day_dl = cached_pkg.get("downloads_last_day", cached_pkg.get("downloads_per_day", 0))
+        last_day_date = cached_pkg.get("downloads_last_day_date", "N/A")
+        today_dl = cached_pkg.get("downloads_current_day", 0)
         stale = True
 
     return {
@@ -289,7 +308,11 @@ def get_pypi_stats(pkg_name, cached_pkg=None):
         "current_date": latest_date,
         "days_live": days_active,
         "total_releases": total_releases,
-        "downloads_per_day": per_day,
+        "downloads_last_day": last_day_dl,
+        "downloads_last_day_date": last_day_date,
+        "downloads_current_day": today_dl,
+        "downloads_current_day_date": today_str,
+        "downloads_per_day": last_day_dl,
         "downloads_per_month": per_month,
         "downloads_lifetime": lifetime,
         "downloads_stale": stale,
@@ -329,23 +352,44 @@ def get_npm_stats(pkg_name, cached_pkg=None):
         total_releases = cached_pkg.get("total_releases", 0)
         api_desc = cached_pkg.get("description", "")
 
-    # 2. Fetch full download range
+    # 2. Fetch lifetime downloads from full range
     today_str = datetime.now().strftime("%Y-%m-%d")
     dl_url = f"https://api.npmjs.org/downloads/range/2020-01-01:{today_str}/{pkg_name}"
     dl_data = fetch_json(dl_url, delay=0.1)
 
     lifetime = 0
     per_month = 0
-    per_day = 0
+    last_day_dl = 0
+    last_day_date = "N/A"
+    today_dl = 0
     days_active = calculate_days_between(first_date) if first_date != "N/A" else 1
 
     if "_error" not in dl_data:
         downloads_list = dl_data.get("downloads", [])
         if downloads_list:
+            # Filter to only days since the package actually existed
+            if first_date != "N/A":
+                downloads_list = [d for d in downloads_list if d.get("day", "") >= first_date]
             lifetime = sum(d.get("downloads", 0) for d in downloads_list)
+
+            # Check if today's date exists in range
+            today_entries = [d for d in downloads_list if d.get("day") == today_str]
+            if today_entries:
+                today_dl = today_entries[0].get("downloads", 0)
+
+            # 30-day sum from range
             last_30 = downloads_list[-30:] if len(downloads_list) >= 30 else downloads_list
             per_month = sum(d.get("downloads", 0) for d in last_30)
-            per_day = round(lifetime / days_active, 1) if days_active > 0 else 0
+
+    # 3. Fetch official last-day / last-month from npm point API
+    dl_day_data = fetch_json(f"https://api.npmjs.org/downloads/point/last-day/{pkg_name}", delay=0.1)
+    if "_error" not in dl_day_data:
+        last_day_dl = dl_day_data.get("downloads", 0)
+        last_day_date = dl_day_data.get("end", "N/A")
+
+    dl_month_data = fetch_json(f"https://api.npmjs.org/downloads/point/last-month/{pkg_name}", delay=0.1)
+    if "_error" not in dl_month_data and dl_month_data.get("downloads", 0) > 0:
+        per_month = dl_month_data.get("downloads", 0)
     
     # Fallback to cached downloads if live NPM API failed or rate-limited
     dl_error = dl_data.get("_error")
@@ -353,7 +397,9 @@ def get_npm_stats(pkg_name, cached_pkg=None):
     if lifetime == 0 and cached_pkg and cached_pkg.get("downloads_lifetime", 0) > 0:
         lifetime = cached_pkg.get("downloads_lifetime", 0)
         per_month = cached_pkg.get("downloads_per_month", 0)
-        per_day = round(lifetime / days_active, 1) if days_active > 0 else cached_pkg.get("downloads_per_day", 0)
+        last_day_dl = cached_pkg.get("downloads_last_day", cached_pkg.get("downloads_per_day", 0))
+        last_day_date = cached_pkg.get("downloads_last_day_date", "N/A")
+        today_dl = cached_pkg.get("downloads_current_day", 0)
         stale = True
 
     return {
@@ -365,7 +411,11 @@ def get_npm_stats(pkg_name, cached_pkg=None):
         "current_date": latest_date,
         "days_live": days_active,
         "total_releases": total_releases,
-        "downloads_per_day": per_day,
+        "downloads_last_day": last_day_dl,
+        "downloads_last_day_date": last_day_date,
+        "downloads_current_day": today_dl,
+        "downloads_current_day_date": today_str,
+        "downloads_per_day": last_day_dl,
         "downloads_per_month": per_month,
         "downloads_lifetime": lifetime,
         "downloads_stale": stale,
@@ -378,19 +428,37 @@ def get_npm_stats(pkg_name, cached_pkg=None):
 def calc_group(items):
     n = len(items)
     if n == 0:
-        return {"count": 0, "total_lifetime": 0, "total_month": 0, "total_day": 0, "avg_lifetime": 0, "avg_month": 0, "avg_day": 0, "avg_days_live": 0}
+        return {
+            "count": 0,
+            "total_lifetime": 0,
+            "total_month": 0,
+            "total_last_day": 0,
+            "total_current_day": 0,
+            "total_day": 0,
+            "avg_lifetime": 0,
+            "avg_month": 0,
+            "avg_last_day": 0,
+            "avg_current_day": 0,
+            "avg_day": 0,
+            "avg_days_live": 0
+        }
     tot_life = sum(i["downloads_lifetime"] for i in items)
     tot_month = sum(i["downloads_per_month"] for i in items)
-    tot_day = sum(i["downloads_per_day"] for i in items)
+    tot_last = sum(i.get("downloads_last_day", i.get("downloads_per_day", 0)) for i in items)
+    tot_cur = sum(i.get("downloads_current_day", 0) for i in items)
     tot_days = sum(i["days_live"] for i in items)
     return {
         "count": n,
         "total_lifetime": tot_life,
         "total_month": tot_month,
-        "total_day": round(tot_day, 1),
+        "total_last_day": tot_last,
+        "total_current_day": tot_cur,
+        "total_day": round(tot_last, 1),
         "avg_lifetime": round(tot_life / n, 1),
         "avg_month": round(tot_month / n, 1),
-        "avg_day": round(tot_day / n, 1),
+        "avg_last_day": round(tot_last / n, 1),
+        "avg_current_day": round(tot_cur / n, 1),
+        "avg_day": round(tot_last / n, 1),
         "avg_days_live": round(tot_days / n, 1)
     }
 
@@ -444,11 +512,13 @@ def print_detailed_table(data):
     RESET = "\033[0m"
     DIM = "\033[2m"
 
-    border = "=" * 111
-    sep = "─" * 111
+    banner_width = 148
+    border = "=" * banner_width
+    sep = "─" * banner_width
 
+    title = "PROGRAM DIRECTORY & WHAT THEY DO"
     print(f"\n{BOLD}{CYAN}{border}{RESET}")
-    print(f"                                      {BOLD}PROGRAM DIRECTORY & WHAT THEY DO{RESET}")
+    print(f"{BOLD}{title.center(banner_width)}{RESET}")
     print(f"{BOLD}{CYAN}{border}{RESET}")
 
     all_rows = []
@@ -459,7 +529,7 @@ def print_detailed_table(data):
 
     max_pkg_len = max([len(r[1]) for r in all_rows], default=19)
     pkg_width = max(19, max_pkg_len)
-    desc_width = max(60, 111 - 6 - 3 - pkg_width - 3)
+    desc_width = max(60, banner_width - 6 - 3 - pkg_width - 3)
 
     headers = ["Type", "Package", "What It Does / Architecture"]
     hdr_str = f"{headers[0]:<6} │ {headers[1]:<{pkg_width}} │ {headers[2]}"
@@ -497,12 +567,16 @@ def print_table(data, detailed=False):
     RESET = "\033[0m"
     DIM = "\033[2m"
 
-    print(f"\n{BOLD}{CYAN}==============================================================================================================={RESET}")
-    print(f"                                   {BOLD}ALEXANDER SORRELL — PACKAGE METRICS & TELEMETRY{RESET}")
-    print(f"{BOLD}{CYAN}==============================================================================================================={RESET}")
+    headers = ["Type", "Package", "First Rel.", "First Date", "Current", "Updated", "Days Live", "Last Day", "Today", "DL / Month", "Lifetime DL"]
+    widths = [6, 17, 10, 11, 10, 11, 10, 10, 8, 12, 13]
+    banner_width = sum(widths) + 3 * (len(widths) - 1)
+    border_line = "=" * banner_width
+    sep_line = "─" * banner_width
 
-    headers = ["Type", "Package", "First Rel.", "First Date", "Current", "Updated", "Days Live", "DL / Day", "DL / Month", "Lifetime DL"]
-    widths = [6, 17, 10, 11, 10, 11, 10, 10, 12, 13]
+    title1 = "ALEXANDER SORRELL — PACKAGE METRICS & TELEMETRY"
+    print(f"\n{BOLD}{CYAN}{border_line}{RESET}")
+    print(f"{BOLD}{title1.center(banner_width)}{RESET}")
+    print(f"{BOLD}{CYAN}{border_line}{RESET}")
 
     def format_row(cols, colors=None, is_bold=False):
         res = []
@@ -518,14 +592,13 @@ def print_table(data, detailed=False):
             res.append(f"{b}{c}{formatted}{RESET}")
         return " │ ".join(res)
 
-    sep_line = "─" * (sum(widths) + 3 * (len(widths) - 1))
-
     # Header Row
     print(f"{BOLD}{format_row(headers)}{RESET}")
     print(f"{DIM}{sep_line}{RESET}")
 
     # PyPI Rows
     for r in data["pypi"]:
+        cur_day_val = r.get("downloads_current_day", 0)
         cols = [
             "pip",
             r["package"] + (" ~" if r.get("downloads_stale") else ""),
@@ -534,17 +607,20 @@ def print_table(data, detailed=False):
             r["current_version"],
             r["current_date"],
             f"{r['days_live']}d",
-            f"{r['downloads_per_day']:,.1f}",
+            f"{r.get('downloads_last_day', r.get('downloads_per_day', 0)):,}",
+            f"{cur_day_val:,}",
             f"{r['downloads_per_month']:,}",
             f"{r['downloads_lifetime']:,}"
         ]
-        colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, GREEN, BOLD + GREEN]
+        cur_day_color = DIM if cur_day_val == 0 else GREEN
+        colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, cur_day_color, GREEN, BOLD + GREEN]
         print(format_row(cols, colors))
 
     print(f"{DIM}{sep_line}{RESET}")
 
     # NPM Rows
     for r in data["npm"]:
+        cur_day_val = r.get("downloads_current_day", 0)
         cols = [
             "npx",
             r["package"] + (" ~" if r.get("downloads_stale") else ""),
@@ -553,23 +629,26 @@ def print_table(data, detailed=False):
             r["current_version"],
             r["current_date"],
             f"{r['days_live']}d",
-            f"{r['downloads_per_day']:,.1f}",
+            f"{r.get('downloads_last_day', r.get('downloads_per_day', 0)):,}",
+            f"{cur_day_val:,}",
             f"{r['downloads_per_month']:,}",
             f"{r['downloads_lifetime']:,}"
         ]
-        colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, GREEN, BOLD + GREEN]
+        cur_day_color = DIM if cur_day_val == 0 else GREEN
+        colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, cur_day_color, GREEN, BOLD + GREEN]
         print(format_row(cols, colors))
 
-    print(f"{BOLD}{CYAN}==============================================================================================================={RESET}")
-    print(f"{BOLD}                                              AVERAGES & SUMMARY{RESET}")
-    print(f"{BOLD}{CYAN}==============================================================================================================={RESET}")
+    print(f"{BOLD}{CYAN}{border_line}{RESET}")
+    title2 = "AVERAGES & SUMMARY"
+    print(f"{BOLD}{title2.center(banner_width)}{RESET}")
+    print(f"{BOLD}{CYAN}{border_line}{RESET}")
 
     p_sum = data["summary"]["pypi"]
     n_sum = data["summary"]["npm"]
     a_sum = data["summary"]["all"]
 
-    sum_headers = ["Category", "Packages", "Avg Days Live", "Avg DL / Day", "Avg DL / Month", "Avg Lifetime / Pkg", "Total Lifetime DL"]
-    sum_widths = [16, 10, 14, 14, 16, 20, 18]
+    sum_headers = ["Category", "Packages", "Avg Days Live", "Avg Last Day", "Avg Today", "Avg DL / Month", "Avg Lifetime / Pkg", "Total Lifetime DL"]
+    sum_widths = [16, 10, 14, 14, 12, 16, 20, 25]
 
     def format_sum_row(cols, colors=None, is_bold=False):
         res = []
@@ -594,22 +673,24 @@ def print_table(data, detailed=False):
         "PyPI (pip)",
         f"{p_sum['count']} pkgs",
         f"{p_sum['avg_days_live']}d",
-        f"{p_sum['avg_day']:,.1f} / day",
+        f"{p_sum.get('avg_last_day', p_sum.get('avg_day', 0)):,.1f} / day",
+        f"{p_sum.get('avg_current_day', 0):,.1f} / day",
         f"{p_sum['avg_month']:,.1f} / mo",
         f"{p_sum['avg_lifetime']:,.1f} / pkg",
         f"{p_sum['total_lifetime']:,}"
-    ], [YELLOW, DIM, YELLOW, GREEN, GREEN, CYAN, BOLD + GREEN]))
+    ], [YELLOW, DIM, YELLOW, GREEN, DIM if p_sum.get('avg_current_day', 0) == 0 else GREEN, GREEN, CYAN, BOLD + GREEN]))
 
     # NPM Summary
     print(format_sum_row([
         "NPM (npx)",
         f"{n_sum['count']} pkgs",
         f"{n_sum['avg_days_live']}d",
-        f"{n_sum['avg_day']:,.1f} / day",
+        f"{n_sum.get('avg_last_day', n_sum.get('avg_day', 0)):,.1f} / day",
+        f"{n_sum.get('avg_current_day', 0):,.1f} / day",
         f"{n_sum['avg_month']:,.1f} / mo",
         f"{n_sum['avg_lifetime']:,.1f} / pkg",
         f"{n_sum['total_lifetime']:,}"
-    ], [MAGENTA, DIM, YELLOW, GREEN, GREEN, CYAN, BOLD + GREEN]))
+    ], [MAGENTA, DIM, YELLOW, GREEN, DIM if n_sum.get('avg_current_day', 0) == 0 else GREEN, GREEN, CYAN, BOLD + GREEN]))
 
     print(f"{DIM}{sum_sep}{RESET}")
 
@@ -618,13 +699,14 @@ def print_table(data, detailed=False):
         "ALL ECOSYSTEM",
         f"{a_sum['count']} pkgs",
         f"{a_sum['avg_days_live']}d",
-        f"{a_sum['avg_day']:,.1f} / day",
+        f"{a_sum.get('avg_last_day', a_sum.get('avg_day', 0)):,.1f} / day",
+        f"{a_sum.get('avg_current_day', 0):,.1f} / day",
         f"{a_sum['avg_month']:,.1f} / mo",
         f"{a_sum['avg_lifetime']:,.1f} / pkg",
         f"{a_sum['total_lifetime']:,}"
-    ], [BOLD + CYAN, BOLD, BOLD + YELLOW, BOLD + GREEN, BOLD + GREEN, BOLD + CYAN, BOLD + GREEN], is_bold=True))
+    ], [BOLD + CYAN, BOLD, BOLD + YELLOW, BOLD + GREEN, BOLD + DIM if a_sum.get('avg_current_day', 0) == 0 else BOLD + GREEN, BOLD + GREEN, BOLD + CYAN, BOLD + GREEN], is_bold=True))
 
-    print(f"{BOLD}{CYAN}==============================================================================================================={RESET}")
+    print(f"{BOLD}{CYAN}{border_line}{RESET}")
 
     if detailed:
         print_detailed_table(data)
