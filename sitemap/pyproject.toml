@@ -6,6 +6,7 @@ build-backend = "setuptools.backends.legacy:build"
 name = "sitemap"
 version = "0.1.0"
 description = "Website awareness layer for AI agents"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.44",

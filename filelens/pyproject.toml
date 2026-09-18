@@ -6,6 +6,7 @@ build-backend = "setuptools.backends.legacy:build"
 name = "filelens"
 version = "0.1.0"
 description = "Intelligent file reading for AI agents"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.7",
