@@ -1,0 +1,22 @@
+{
+  "last_seen": {
+    "example.com": 1789878732.17488,
+    "testsite.example": 1789880329.033611,
+    "job-boards.greenhouse.io": 1789898592.1122181,
+    "nvidia.wd5.myworkdayjobs.com": 1789889635.649584,
+    "nvidia.com": 1789889693.932404,
+    "jobs.nvidia.com": 1789889724.129277,
+    "product.ai": 1789955520.485964
+  },
+  "blocked": {
+    "jobs.nvidia.com": {
+      "when": "2026-09-20 02:35:39",
+      "why": "challenge vendor resource loaded: https://www.recaptcha.net/recaptcha/api.js?render=6LfwboYUAAAAAJb6QcVuRXi7R9pTqgGKF6TnNzia"
+    },
+    "product.ai": {
+      "when": "2026-09-20 20:52:08",
+      "why": "challenge vendor resource loaded: https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+    }
+  },
+  "never": []
+}

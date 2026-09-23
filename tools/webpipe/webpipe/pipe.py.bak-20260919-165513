@@ -1,0 +1,285 @@
+import json
+import time
+import urllib.request
+import re
+import websocket
+from .logger import WebPipeLogger
+from .auth import AuthDetector, AuthResolver
+from .daemon import HeadlessDaemon, HEADLESS_PORT
+from .input import HumanInput
+
+class WebPipe:
+    """
+    Direct Web-to-Model Data Streaming Pipe.
+    Runs 100% invisibly in the background on an actual silent headless Chrome daemon (:9226).
+    Synchronizes live session cookies from your desktop profile (:9225) so it is authenticated
+    on all your accounts without ever creating a window, tab, or visual flicker on your screen.
+
+    If a CAPTCHA or Login barrier is hit, it hands off to the visible browser (:9225) for human resolution,
+    syncs the new cookies back, and continues in total silence.
+    """
+
+    def __init__(self, port=HEADLESS_PORT, headed_port=9225, logger=None, interactive=True):
+        self.port = port
+        self.headed_port = headed_port
+        self.logger = logger or WebPipeLogger()
+        self.interactive = interactive
+        self.daemon = HeadlessDaemon(headless_port=self.port, headed_port=self.headed_port)
+        self.resolver = AuthResolver(port=self.headed_port, logger=self.logger)
+        self._browser_ws_url = None
+
+    def _ensure_daemon(self):
+        self.daemon.ensure_running()
+
+    def _get_browser_ws_url(self):
+        self._ensure_daemon()
+        if not self._browser_ws_url:
+            url = f"http://127.0.0.1:{self.port}/json/version"
+            with urllib.request.urlopen(url, timeout=5) as r:
+                ver = json.loads(r.read().decode())
+                self._browser_ws_url = ver["webSocketDebuggerUrl"]
+        return self._browser_ws_url
+
+    def _create_silent_target(self, initial_url="about:blank"):
+        b_ws_url = self._get_browser_ws_url()
+        b_ws = websocket.create_connection(b_ws_url, timeout=5)
+        msg = {
+            "id": 1,
+            "method": "Target.createTarget",
+            "params": {"url": initial_url}
+        }
+        b_ws.send(json.dumps(msg))
+        res = json.loads(b_ws.recv())
+        target_id = res.get("result", {}).get("targetId")
+        b_ws.close()
+
+        ws_url = f"ws://127.0.0.1:{self.port}/devtools/page/{target_id}"
+        return target_id, ws_url
+
+    def _close_silent_target(self, target_id):
+        try:
+            b_ws_url = self._get_browser_ws_url()
+            b_ws = websocket.create_connection(b_ws_url, timeout=5)
+            msg = {
+                "id": 1,
+                "method": "Target.closeTarget",
+                "params": {"targetId": target_id}
+            }
+            b_ws.send(json.dumps(msg))
+            b_ws.recv()
+            b_ws.close()
+            return True
+        except Exception:
+            return False
+
+    def query(self, target_url, wait_seconds=3, capture_network_api=True, keep_tab_open=False):
+        t0 = time.time()
+        self.logger.log_request_start(target_url, {"wait": wait_seconds, "capture_api": capture_network_api})
+        self._ensure_daemon()
+
+        # 1. Create silent background target on the headless daemon (ZERO screen presence)
+        target_id, ws_url = self._create_silent_target("about:blank")
+        captured_json_payloads = []
+
+        try:
+            ws = websocket.create_connection(ws_url, timeout=15)
+            
+            # Enable domains
+            msg_id = 1
+            ws.send(json.dumps({"id": msg_id, "method": "Page.enable"}))
+            ws.recv()
+            
+            msg_id += 1
+            ws.send(json.dumps({"id": msg_id, "method": "Runtime.enable"}))
+            ws.recv()
+
+            msg_id += 1
+            ws.send(json.dumps({"id": msg_id, "method": "Network.enable"}))
+            ws.recv()
+
+            # Apply stealth scripts and real User-Agent BEFORE navigation
+            self.daemon.apply_stealth_to_ws(ws)
+
+            # Navigate to target_url with full stealth active
+            msg_id += 1
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": "Page.navigate",
+                "params": {"url": target_url}
+            }))
+            ws.recv()
+
+            # Wait for background page to render
+            time.sleep(wait_seconds)
+
+            # Intercept raw JSON API network responses
+            if capture_network_api:
+                ws.settimeout(0.5)
+                try:
+                    while True:
+                        raw = ws.recv()
+                        evt = json.loads(raw)
+                        method = evt.get("method", "")
+                        if method == "Network.responseReceived":
+                            params = evt.get("params", {})
+                            resp = params.get("response", {})
+                            mime = resp.get("mimeType", "")
+                            req_id = params.get("requestId")
+                            if "json" in mime or "api" in resp.get("url", "").lower():
+                                body_msg_id = 9999
+                                ws.send(json.dumps({
+                                    "id": body_msg_id,
+                                    "method": "Network.getResponseBody",
+                                    "params": {"requestId": req_id}
+                                }))
+                                body_res = json.loads(ws.recv())
+                                body_text = body_res.get("result", {}).get("body", "")
+                                if body_text:
+                                    try:
+                                        parsed = json.loads(body_text)
+                                        captured_json_payloads.append({
+                                            "url": resp.get("url"),
+                                            "status": resp.get("status"),
+                                            "data": parsed
+                                        })
+                                    except Exception:
+                                        pass
+                except (websocket.WebSocketTimeoutException, TimeoutError):
+                    pass
+                ws.settimeout(15)
+
+            # Get current URL and Title
+            msg_id += 1
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "window.location.href"}
+            }))
+            current_url = json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", target_url)
+
+            msg_id += 1
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "document.title"}
+            }))
+            title = json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", "")
+
+            # Get full innerText
+            msg_id += 1
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "document.body ? document.body.innerText : ''"}
+            }))
+            raw_text = json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", "")
+
+            # Get raw HTML length for savings audit
+            msg_id += 1
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "document.documentElement ? document.documentElement.outerHTML.length : 0"}
+            }))
+            raw_dom_len = json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", len(raw_text) * 4)
+
+            # 2. Check for Auth Barrier / Challenge
+            is_challenge, challenge_reason = AuthDetector.check_is_challenge(current_url, raw_text)
+            if is_challenge:
+                # Open challenge on headed browser (:9225) so Alex can see and solve it
+                try:
+                    open_url = f"http://127.0.0.1:{self.headed_port}/json/new?{current_url}"
+                    req = urllib.request.Request(open_url, method="PUT")
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        h_tab = json.loads(r.read().decode())
+                        h_tab_id = h_tab["id"]
+                except Exception:
+                    h_tab_id = None
+
+                resolved = self.resolver.handle_auth_barrier(
+                    tab_id=h_tab_id or target_id,
+                    current_url=current_url,
+                    reason=challenge_reason,
+                    interactive=self.interactive
+                )
+
+                if resolved:
+                    # Re-sync fresh cookies from headed browser back to headless daemon
+                    self.daemon.sync_cookies_from_headed()
+                    # Close headed helper tab
+                    if h_tab_id:
+                        try:
+                            urllib.request.urlopen(f"http://127.0.0.1:{self.headed_port}/json/close/{h_tab_id}", timeout=3)
+                        except Exception:
+                            pass
+                    # Reload page on headless daemon
+                    time.sleep(1)
+                    msg_id += 1
+                    ws.send(json.dumps({"id": msg_id, "method": "Page.reload"}))
+                    ws.recv()
+                    time.sleep(wait_seconds)
+
+                    msg_id += 1
+                    ws.send(json.dumps({
+                        "id": msg_id,
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "document.body ? document.body.innerText : ''"}
+                    }))
+                    raw_text = json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", raw_text)
+
+            # 3. Clean Extractor
+            clean_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+            clean_text = "\n".join(clean_lines)
+
+            # Log comprehensive page state
+            is_wrong = ("404" in title or "Page Not Found" in title or "error" in title.lower())
+            self.logger.log_page_state(
+                url=current_url,
+                title=title,
+                http_status=404 if is_wrong else 200,
+                is_signed_in=not is_challenge,
+                user_identifier="broodierchip-m1air",
+                auth_barrier=is_challenge,
+                is_wrong_page=is_wrong,
+                wrong_page_reason="404 / Title error" if is_wrong else None,
+                actions_taken=["navigate", "stealth_override", "dom_extract"]
+            )
+
+            duration_ms = int((time.time() - t0) * 1000)
+            clean_bytes = len(clean_text.encode("utf-8"))
+
+            self.logger.log_data_extracted(
+                url=current_url,
+                raw_bytes=raw_dom_len,
+                clean_bytes=clean_bytes,
+                api_payloads_count=len(captured_json_payloads),
+                duration_ms=duration_ms
+            )
+
+            result = {
+                "status": "SUCCESS",
+                "target_url": target_url,
+                "final_url": current_url,
+                "title": title,
+                "auth_detected": is_challenge,
+                "captured_api_payloads": captured_json_payloads,
+                "clean_content": clean_text,
+                "metrics": {
+                    "raw_dom_bytes": raw_dom_len,
+                    "clean_bytes": clean_bytes,
+                    "savings_pct": f"{round((1.0 - (clean_bytes / max(1, raw_dom_len))) * 100, 2)}%",
+                    "duration_ms": duration_ms
+                }
+            }
+
+            ws.close()
+            if not keep_tab_open:
+                self._close_silent_target(target_id)
+
+            return result
+
+        except Exception as e:
+            self.logger.log_error(target_url, str(e))
+            if not keep_tab_open:
+                self._close_silent_target(target_id)
+            raise e
