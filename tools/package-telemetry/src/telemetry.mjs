@@ -255,6 +255,12 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     // PyPI publishes no execution counts and has no jsDelivr equivalent:
     // runs are honestly null, rendered as n/a, never zero-filled.
     runs_30d: null,
+    runs_last_day: null,
+    runs_last_day_date: null,
+    runs_today: null,
+    runs_prev_30d: null,
+    runs_rank: null,
+    runs_rank_prev: null,
     runs_window: null,
     runs_stale: false,
     runs_error: null,
@@ -265,21 +271,33 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
 
 /**
  * Fetch jsDelivr CDN hits as the "runs" proxy for an npm package. npm and
- * PyPI publish no execution counts, so runs = CDN file serves over the
- * trailing window jsDelivr reports (30 days). An install that is never
- * imported scores downloads but no runs; a browser/CI-fetched file scores
- * runs without an npm download — the two columns answer different questions.
+ * PyPI publish no execution counts, so runs = CDN file serves. One call
+ * yields every runs field: trailing-30d total, the daily map (source of
+ * last-day + today), the prior-period total, and the CDN rank pair.
+ * jsDelivr data lags ~1-2 days, so runs_today is usually null (rendered
+ * n/a) — never backfilled. There is no lifetime-runs source: jsDelivr
+ * retains 30 days only, so lifetime runs stay honestly null.
  */
 export async function getJsdelivrRuns(pkgName, cachedPkg = null, fetcher = fetchJson) {
   const url = `https://data.jsdelivr.com/v1/stats/packages/npm/${pkgName}`;
   const data = await fetcher(url, 3, 50);
   if (!data._error && data.hits && typeof data.hits === 'object') {
-    const dates = Object.keys(data.hits.dates || {}).sort();
+    const dayMap = data.hits.dates || {};
+    const dates = Object.keys(dayMap).sort();
     const total = typeof data.hits.total === 'number'
       ? data.hits.total
-      : Object.values(data.hits.dates || {}).reduce((s, n) => s + (n || 0), 0);
+      : Object.values(dayMap).reduce((s, n) => s + (n || 0), 0);
+    const lastDate = dates.length > 0 ? dates[dates.length - 1] : null;
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const prev = (data.hits.prev && typeof data.hits.prev === 'object') ? data.hits.prev : {};
     return {
       runs_30d: total,
+      runs_last_day: lastDate ? (dayMap[lastDate] ?? 0) : 0,
+      runs_last_day_date: lastDate,
+      runs_today: Object.hasOwn(dayMap, todayKey) ? (dayMap[todayKey] ?? 0) : null,
+      runs_prev_30d: typeof prev.total === 'number' ? prev.total : null,
+      runs_rank: typeof data.hits.rank === 'number' ? data.hits.rank : null,
+      runs_rank_prev: typeof prev.rank === 'number' ? prev.rank : null,
       runs_window: dates.length > 0 ? `${dates[0]}..${dates[dates.length - 1]}` : 'N/A',
       runs_stale: false,
       runs_error: null
@@ -288,12 +306,29 @@ export async function getJsdelivrRuns(pkgName, cachedPkg = null, fetcher = fetch
   if (cachedPkg && (cachedPkg.runs_30d || 0) > 0) {
     return {
       runs_30d: cachedPkg.runs_30d || 0,
+      runs_last_day: cachedPkg.runs_last_day ?? null,
+      runs_last_day_date: cachedPkg.runs_last_day_date || null,
+      runs_today: cachedPkg.runs_today ?? null,
+      runs_prev_30d: cachedPkg.runs_prev_30d ?? null,
+      runs_rank: cachedPkg.runs_rank ?? null,
+      runs_rank_prev: cachedPkg.runs_rank_prev ?? null,
       runs_window: cachedPkg.runs_window || 'N/A',
       runs_stale: true,
       runs_error: data._error || null
     };
   }
-  return { runs_30d: 0, runs_window: 'N/A', runs_stale: false, runs_error: data._error || null };
+  return {
+    runs_30d: 0,
+    runs_last_day: null,
+    runs_last_day_date: null,
+    runs_today: null,
+    runs_prev_30d: null,
+    runs_rank: null,
+    runs_rank_prev: null,
+    runs_window: 'N/A',
+    runs_stale: false,
+    runs_error: data._error || null
+  };
 }
 
 /**
@@ -408,7 +443,11 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
 
   // Runs are fetched ONLY on request (--runs): one extra API call per
   // package. Otherwise null — never a silent cached number.
-  let runs = { runs_30d: null, runs_window: null, runs_stale: false, runs_error: null };
+  let runs = {
+    runs_30d: null, runs_last_day: null, runs_last_day_date: null,
+    runs_today: null, runs_prev_30d: null, runs_rank: null,
+    runs_rank_prev: null, runs_window: null, runs_stale: false, runs_error: null
+  };
   if (wantRuns) {
     runs = await getJsdelivrRuns(pkgName, cachedPkg, fetcher);
   }
@@ -417,6 +456,12 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
     registry: 'NPM (npx)',
     package: pkgName,
     runs_30d: runs.runs_30d,
+    runs_last_day: runs.runs_last_day,
+    runs_last_day_date: runs.runs_last_day_date,
+    runs_today: runs.runs_today,
+    runs_prev_30d: runs.runs_prev_30d,
+    runs_rank: runs.runs_rank,
+    runs_rank_prev: runs.runs_rank_prev,
     runs_window: runs.runs_window,
     runs_stale: runs.runs_stale,
     runs_error: runs.runs_error,
@@ -644,12 +689,13 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
   const RESET = '\x1b[0m';
   const DIM = '\x1b[2m';
 
-  const headers = ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'Today', 'DL / Month', 'Lifetime DL'];
-  const widths = [6, 17, 10, 11, 10, 11, 10, 10, 8, 12, 13];
-  if (runs) {
-    headers.push('Runs 30d');
-    widths.push(10);
-  }
+  // Runs mode pairs every download column with its runs partner; rank closes the row.
+  const headers = runs
+    ? ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'R-Day', 'Today', 'R-Today', 'DL / Month', 'R-30d', 'Lifetime DL', 'R-Life', 'CDN Rank']
+    : ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'Today', 'DL / Month', 'Lifetime DL'];
+  const widths = runs
+    ? [6, 17, 10, 11, 10, 11, 10, 10, 8, 8, 8, 12, 10, 13, 7, 10]
+    : [6, 17, 10, 11, 10, 11, 10, 10, 8, 12, 13];
   const bannerWidth = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1); // 148
   const border = '='.repeat(bannerWidth);
   const sepLine = '─'.repeat(bannerWidth);
@@ -682,9 +728,22 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
   out += `${BOLD}${formatRow(headers)}${RESET}\n`;
   out += `${DIM}${sepLine}${RESET}\n`;
 
-  const runsCell = (r) => {
-    if (r.runs_30d == null) return 'n/a';
-    return r.runs_30d.toLocaleString() + (r.runs_stale ? ' ~' : '');
+  const runsVal = (r, field) => {
+    if (r[field] == null) return 'n/a';
+    return r[field].toLocaleString() + (r.runs_stale ? ' ~' : '');
+  };
+  const compactRank = (n) => {
+    if (n >= 1e6) return `${Math.round(n / 1e5) / 10}M`;
+    if (n >= 1e3) return `${Math.round(n / 100) / 10}k`;
+    return `${n}`;
+  };
+  const rankCell = (r) => {
+    if (r.runs_rank == null) return 'n/a';
+    // Lower rank number = more hits, so a drop in number is an improvement.
+    const trend = (r.runs_rank_prev == null || r.runs_rank === r.runs_rank_prev)
+      ? ''
+      : (r.runs_rank < r.runs_rank_prev ? ' ▲' : ' ▼');
+    return compactRank(r.runs_rank) + trend + (r.runs_stale ? ' ~' : '');
   };
 
   // PyPI Rows
@@ -698,17 +757,26 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
       r.first_date,
       r.current_version,
       r.current_date,
-      `${r.days_live}d`,
-      lastVal.toLocaleString(),
-      curVal.toLocaleString(),
-      r.downloads_per_month.toLocaleString(),
-      r.downloads_lifetime.toLocaleString()
+      `${r.days_live}d`
     ];
     const curColor = curVal === 0 ? DIM : GREEN;
-    const colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, curColor, GREEN, BOLD + GREEN];
+    const colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW];
     if (runs) {
-      cols.push(runsCell(r));
-      colors.push(DIM);
+      cols.push(
+        lastVal.toLocaleString(), runsVal(r, 'runs_last_day'),
+        curVal.toLocaleString(), runsVal(r, 'runs_today'),
+        r.downloads_per_month.toLocaleString(), runsVal(r, 'runs_30d'),
+        r.downloads_lifetime.toLocaleString(), 'n/a', rankCell(r)
+      );
+      colors.push(GREEN, DIM, curColor, DIM, GREEN, DIM, BOLD + GREEN, DIM, DIM);
+    } else {
+      cols.push(
+        lastVal.toLocaleString(),
+        curVal.toLocaleString(),
+        r.downloads_per_month.toLocaleString(),
+        r.downloads_lifetime.toLocaleString()
+      );
+      colors.push(GREEN, curColor, GREEN, BOLD + GREEN);
     }
     out += `${formatRow(cols, colors)}\n`;
   }
@@ -726,17 +794,26 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
       r.first_date,
       r.current_version,
       r.current_date,
-      `${r.days_live}d`,
-      lastVal.toLocaleString(),
-      curVal.toLocaleString(),
-      r.downloads_per_month.toLocaleString(),
-      r.downloads_lifetime.toLocaleString()
+      `${r.days_live}d`
     ];
     const curColor = curVal === 0 ? DIM : GREEN;
-    const colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, curColor, GREEN, BOLD + GREEN];
+    const colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW];
     if (runs) {
-      cols.push(runsCell(r));
-      colors.push(CYAN);
+      cols.push(
+        lastVal.toLocaleString(), runsVal(r, 'runs_last_day'),
+        curVal.toLocaleString(), runsVal(r, 'runs_today'),
+        r.downloads_per_month.toLocaleString(), runsVal(r, 'runs_30d'),
+        r.downloads_lifetime.toLocaleString(), 'n/a', rankCell(r)
+      );
+      colors.push(GREEN, CYAN, curColor, CYAN, GREEN, CYAN, BOLD + GREEN, DIM, CYAN);
+    } else {
+      cols.push(
+        lastVal.toLocaleString(),
+        curVal.toLocaleString(),
+        r.downloads_per_month.toLocaleString(),
+        r.downloads_lifetime.toLocaleString()
+      );
+      colors.push(GREEN, curColor, GREEN, BOLD + GREEN);
     }
     out += `${formatRow(cols, colors)}\n`;
   }
@@ -873,11 +950,15 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
     out += `${YELLOW}  ~ Cached runs numbers (jsDelivr unavailable): ${names}${RESET}\n`;
   }
   if (runs) {
-    out += `${DIM}  Runs 30d = jsDelivr CDN file serves, trailing 30 days (n/a: no runs source for PyPI)${RESET}\n`;
+    const dayDates = [...(data.pypi || []), ...(data.npm || [])]
+      .map(r => r.runs_last_day_date).filter(Boolean).sort();
+    const rDay = dayDates.length > 0 ? dayDates[dayDates.length - 1] : 'N/A';
+    out += `${DIM}  R-Day = jsDelivr serves on ${rDay} (feed lags ~1-2d) │ R-Today = serves today, if reported │ R-30d = trailing-30d serves${RESET}\n`;
+    out += `${DIM}  R-Life = n/a: jsDelivr retains 30 days only, lifetime runs unknowable │ CDN Rank = rank by hits, ▲/▼ vs prior 30d │ n/a on pip: no runs source for PyPI${RESET}\n`;
   }
 
   const modeHint = !detailed ? '  •  Detailed mode: --detailed (or -d)' : '';
-  const runsHint = !runs ? '  •  Runs column: --runs' : '';
+  const runsHint = !runs ? '  •  Runs columns: --runs' : '';
   out += `${DIM}Config: ${configPath || 'packages.json'}${outputPath ? '  •  Output: ' + outputPath : ''}${modeHint}${runsHint}${RESET}\n\n`;
 
   return out;

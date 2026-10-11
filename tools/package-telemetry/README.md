@@ -75,7 +75,8 @@ npx package-telemetry --detailed
 # or:
 npx package-telemetry-detailed
 
-# Runs mode (adds a "Runs 30d" column: jsDelivr CDN serves, trailing 30 days; n/a for PyPI)
+# Runs mode (pairs every download column with runs: R-Day, R-Today, R-30d from
+# jsDelivr CDN serves; R-Life is n/a since jsDelivr retains 30 days only; plus CDN Rank)
 npx package-telemetry --runs
 # or:
 npx package-telemetry-runs

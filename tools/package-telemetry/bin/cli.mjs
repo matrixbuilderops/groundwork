@@ -37,10 +37,12 @@ MODES:
                              package's live registry summary if omitted.
                              (Shortcut: run directly as \`package-telemetry-detailed\`)
 
-  --runs                      Add a "Runs 30d" column next to downloads (jsDelivr CDN
-                             file serves, trailing 30 days; n/a for PyPI which
-                             publishes no execution counts). Combines with
-                             --detailed and --json.
+  --runs                      Pair every download column with its runs column
+                             (jsDelivr CDN file serves: R-Day, R-Today, R-30d;
+                             R-Life is n/a, jsDelivr retains 30 days only) plus
+                             a CDN Rank column. n/a for PyPI, which publishes
+                             no execution counts. Combines with --detailed
+                             and --json.
 
   --json                     Output calculated telemetry metrics as JSON to stdout.
 
