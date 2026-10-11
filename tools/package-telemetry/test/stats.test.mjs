@@ -47,7 +47,7 @@ const pypiStats = (dates) => ({
 });
 
 describe('getPyPIStats mirror handling', () => {
-  it('headlines without_mirrors and reports with_mirrors alongside', async () => {
+  it('counts everything by default and reports the real series in *_real', async () => {
     const dates = [
       { day: isoDay(-3), plain: 10, mirrors: 100 },
       { day: isoDay(-2), plain: 20, mirrors: 200 },
@@ -55,26 +55,44 @@ describe('getPyPIStats mirror handling', () => {
     ];
     const fetcher = async (url) => (url.includes('pypistats') ? pypiStats(dates) : pypiMeta);
     const r = await getPyPIStats('stub-pkg', null, '', fetcher);
-    assert.equal(r.downloads_lifetime, 60);
-    assert.equal(r.downloads_per_month, 60);
-    assert.equal(r.downloads_last_day, 30);
+    assert.equal(r.downloads_lifetime, 600);
+    assert.equal(r.downloads_per_month, 600);
+    assert.equal(r.downloads_last_day, 300);
     assert.equal(r.downloads_last_day_date, isoDay(-1));
+    assert.equal(r.downloads_lifetime_real, 60);
+    assert.equal(r.downloads_per_month_real, 60);
+    assert.equal(r.downloads_last_day_real, 30);
     assert.equal(r.downloads_lifetime_with_mirrors, 600);
-    assert.equal(r.downloads_per_month_with_mirrors, 600);
-    assert.equal(r.downloads_last_day_with_mirrors, 300);
+    assert.equal(r.headlines_real_only, false);
     assert.equal(r.downloads_stale, false);
     assert.equal(r.downloads_error, null);
     assert.equal(r.meta_error, null);
   });
 
-  it('uses strict last calendar day before today even when it is zero', async () => {
+  it('realOnly headlines the mirror-excluded series', async () => {
+    const dates = [
+      { day: isoDay(-3), plain: 10, mirrors: 100 },
+      { day: isoDay(-2), plain: 20, mirrors: 200 },
+      { day: isoDay(-1), plain: 30, mirrors: 300 }
+    ];
+    const fetcher = async (url) => (url.includes('pypistats') ? pypiStats(dates) : pypiMeta);
+    const r = await getPyPIStats('stub-pkg', null, '', fetcher, true);
+    assert.equal(r.downloads_lifetime, 60);
+    assert.equal(r.downloads_per_month, 60);
+    assert.equal(r.downloads_last_day, 30);
+    assert.equal(r.downloads_lifetime_with_mirrors, 600);
+    assert.equal(r.headlines_real_only, true);
+  });
+
+  it('uses strict last calendar day in both series (zero-safe)', async () => {
     const dates = [
       { day: isoDay(-2), plain: 50, mirrors: 500 },
-      { day: isoDay(-1), plain: 0, mirrors: 0 }
+      { day: isoDay(-1), plain: 0, mirrors: 700 }
     ];
     const fetcher = async (url) => (url.includes('pypistats') ? pypiStats(dates) : pypiMeta);
     const r = await getPyPIStats('stub-pkg', null, '', fetcher);
-    assert.equal(r.downloads_last_day, 0);
+    assert.equal(r.downloads_last_day, 700);
+    assert.equal(r.downloads_last_day_real, 0);
     assert.equal(r.downloads_last_day_date, isoDay(-1));
   });
 });
@@ -164,9 +182,11 @@ describe('metadata errors and stale fallback', () => {
     const fetcher = async () => ({ _error: 'boom' });
     const r = await getPyPIStats('stub-pkg', cache, '', fetcher);
     assert.equal(r.downloads_stale, true);
-    assert.equal(r.downloads_lifetime, 111);
-    assert.equal(r.downloads_per_month, 22);
-    assert.equal(r.downloads_last_day, 3);
+    assert.equal(r.downloads_lifetime, 999);
+    assert.equal(r.downloads_per_month, 200);
+    assert.equal(r.downloads_last_day, 30);
+    assert.equal(r.downloads_lifetime_real, 111);
+    assert.equal(r.downloads_per_month_real, 22);
     assert.equal(r.downloads_lifetime_with_mirrors, 999);
     assert.equal(r.downloads_per_month_with_mirrors, 200);
     assert.equal(r.downloads_error, 'boom');

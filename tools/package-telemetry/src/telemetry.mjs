@@ -134,11 +134,13 @@ export async function getPepyStats(pkgName, fetcher = fetchJson) {
 
 /**
  * Fetch PyPI stats and metadata.
- * Headline download numbers use pypistats `without_mirrors` (real installs);
- * mirror-inflated totals are reported alongside in `*_with_mirrors` fields.
+ * Headlines count EVERYTHING (pypistats `with_mirrors`) by default — this is
+ * a tracker, and trackers do not silently discard traffic. `--real-only`
+ * switches headlines to `without_mirrors`; the `*_real` fields carry the
+ * mirror-excluded series in both modes.
  * Source chain: pypistats -> pepy.tech fallback (mirrors included) -> cache.
  */
-export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '', fetcher = fetchJson) {
+export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '', fetcher = fetchJson, realOnly = false) {
   const pypiUrl = `https://pypi.org/pypi/${pkgName}/json`;
   const pypiData = await fetcher(pypiUrl, 3, 50);
   const metaError = pypiData._error || null;
@@ -191,6 +193,10 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
   let lastDayDl = 0;
   let lastDayDate = 'N/A';
   let todayDl = 0;
+  let lifetimeReal = 0;
+  let perMonthReal = 0;
+  let lastDayReal = 0;
+  let todayReal = 0;
   let lifetimeWithMirrors = 0;
   let perMonthWithMirrors = 0;
   let lastDayWithMirrors = 0;
@@ -201,47 +207,43 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
   if (!statsData._error && Array.isArray(statsData.data)) {
     const dataList = statsData.data;
     if (dataList.length > 0) {
-      const byDate = {};
-      const byDateWith = {};
+      const byDateReal = {};
+      const byDateFull = {};
       for (const d of dataList) {
         const dt = d.date || '';
         if (d.category === 'without_mirrors') {
-          byDate[dt] = d.downloads || 0;
+          byDateReal[dt] = d.downloads || 0;
         } else if (d.category === 'with_mirrors') {
-          byDateWith[dt] = d.downloads || 0;
+          byDateFull[dt] = d.downloads || 0;
         }
       }
-      // Headline = real installs. Fall back to mirror counts only when the
-      // API reports no without_mirrors rows at all (should not happen).
-      const primary = Object.keys(byDate).length > 0 ? byDate : byDateWith;
-      const sortedDates = Object.keys(primary).sort();
-      lifetime = Object.values(primary).reduce((s, v) => s + v, 0);
-      const last30Dates = sortedDates.slice(-30);
-      perMonth = last30Dates.reduce((s, dt) => s + primary[dt], 0);
+      const headline = realOnly ? byDateReal : byDateFull;
+      const sortedDates = [...new Set([...Object.keys(byDateReal), ...Object.keys(byDateFull)])].sort();
+      const sum = (series) => Object.values(series).reduce((s, v) => s + v, 0);
+      const last30 = sortedDates.slice(-30);
+      const last30sum = (series) => last30.reduce((s, dt) => s + (series[dt] || 0), 0);
+      lifetime = sum(headline);
+      perMonth = last30sum(headline);
+      lifetimeReal = sum(byDateReal);
+      perMonthReal = last30sum(byDateReal);
+      lifetimeWithMirrors = sum(byDateFull);
+      perMonthWithMirrors = last30sum(byDateFull);
 
-      // Check if today's date exists in registry
-      todayDl = primary[todayStr] || 0;
+      todayDl = headline[todayStr] || 0;
+      todayReal = byDateReal[todayStr] || 0;
+      todayWithMirrors = byDateFull[todayStr] || 0;
 
       // Last finalized completed day (strictly before today)
       const pastDates = sortedDates.filter(dt => dt < todayStr);
       if (pastDates.length > 0) {
         lastDayDate = pastDates[pastDates.length - 1];
-        lastDayDl = primary[lastDayDate];
       } else if (sortedDates.length > 0) {
         lastDayDate = sortedDates[sortedDates.length - 1];
-        lastDayDl = primary[lastDayDate];
       }
-
-      // Mirror-inflated series, reported alongside for transparency.
-      const sortedWith = Object.keys(byDateWith).sort();
-      lifetimeWithMirrors = Object.values(byDateWith).reduce((s, v) => s + v, 0);
-      perMonthWithMirrors = sortedWith.slice(-30).reduce((s, dt) => s + byDateWith[dt], 0);
-      todayWithMirrors = byDateWith[todayStr] || 0;
-      const pastWith = sortedWith.filter(dt => dt < todayStr);
-      if (pastWith.length > 0) {
-        lastDayWithMirrors = byDateWith[pastWith[pastWith.length - 1]] || 0;
-      } else if (sortedWith.length > 0) {
-        lastDayWithMirrors = byDateWith[sortedWith[sortedWith.length - 1]] || 0;
+      if (lastDayDate !== 'N/A') {
+        lastDayDl = headline[lastDayDate] || 0;
+        lastDayReal = byDateReal[lastDayDate] || 0;
+        lastDayWithMirrors = byDateFull[lastDayDate] || 0;
       }
     }
   }
@@ -249,7 +251,9 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
   const dlError = statsData._error || null;
   let stale = false;
   let dlSource = 'pypistats';
-  if (lifetime === 0 && (statsData._error || !Array.isArray(statsData.data))) {
+  // pepy.tech reads the same logs mirrors-included, so it backs the default
+  // headlines only — never a real-only view (it cannot split mirrors out).
+  if (!realOnly && lifetime === 0 && (statsData._error || !Array.isArray(statsData.data))) {
     const pepy = await getPepyStats(pkgName, fetcher);
     if (pepy && pepy.lifetime > 0) {
       lifetime = pepy.lifetime;
@@ -257,19 +261,40 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
       lastDayDl = pepy.lastDay;
       lastDayDate = pepy.lastDayDate;
       todayDl = pepy.today;
+      lifetimeWithMirrors = pepy.lifetime;
+      perMonthWithMirrors = pepy.perMonth;
+      lastDayWithMirrors = pepy.lastDay;
+      todayWithMirrors = pepy.today;
       dlSource = 'pepy-fallback';
     }
   }
-  if (lifetime === 0 && cachedPkg && (cachedPkg.downloads_lifetime || 0) > 0) {
-    lifetime = cachedPkg.downloads_lifetime || 0;
-    perMonth = cachedPkg.downloads_per_month || 0;
-    lastDayDl = cachedPkg.downloads_last_day || cachedPkg.downloads_per_day || 0;
+  if (lifetime === 0 && cachedPkg &&
+      ((cachedPkg.downloads_lifetime || 0) > 0 ||
+       (cachedPkg.downloads_lifetime_with_mirrors || 0) > 0 ||
+       (cachedPkg.downloads_lifetime_real || 0) > 0)) {
+    // Pre-flip caches (no marker) hold real-only headlines + with_mirrors
+    // alongside; resolve each field to this run's headline contract.
+    const cachedIsReal = cachedPkg.headlines_real_only !== false;
+    if (realOnly) {
+      lifetime = cachedIsReal ? (cachedPkg.downloads_lifetime || 0) : (cachedPkg.downloads_lifetime_real || 0);
+      perMonth = cachedIsReal ? (cachedPkg.downloads_per_month || 0) : (cachedPkg.downloads_per_month_real || 0);
+      lastDayDl = cachedIsReal ? (cachedPkg.downloads_last_day ?? cachedPkg.downloads_per_day ?? 0) : (cachedPkg.downloads_last_day_real || 0);
+      todayDl = cachedIsReal ? (cachedPkg.downloads_current_day || 0) : (cachedPkg.downloads_current_day_real || 0);
+    } else {
+      lifetime = cachedIsReal ? (cachedPkg.downloads_lifetime_with_mirrors || cachedPkg.downloads_lifetime || 0) : (cachedPkg.downloads_lifetime || 0);
+      perMonth = cachedIsReal ? (cachedPkg.downloads_per_month_with_mirrors || cachedPkg.downloads_per_month || 0) : (cachedPkg.downloads_per_month || 0);
+      lastDayDl = cachedIsReal ? (cachedPkg.downloads_last_day_with_mirrors || cachedPkg.downloads_last_day || cachedPkg.downloads_per_day || 0) : (cachedPkg.downloads_last_day || cachedPkg.downloads_per_day || 0);
+      todayDl = cachedIsReal ? (cachedPkg.downloads_current_day_with_mirrors || cachedPkg.downloads_current_day || 0) : (cachedPkg.downloads_current_day || 0);
+    }
     lastDayDate = cachedPkg.downloads_last_day_date || 'N/A';
-    todayDl = cachedPkg.downloads_current_day || 0;
-    lifetimeWithMirrors = cachedPkg.downloads_lifetime_with_mirrors || 0;
-    perMonthWithMirrors = cachedPkg.downloads_per_month_with_mirrors || 0;
-    lastDayWithMirrors = cachedPkg.downloads_last_day_with_mirrors || 0;
-    todayWithMirrors = cachedPkg.downloads_current_day_with_mirrors || 0;
+    lifetimeReal = cachedIsReal ? (cachedPkg.downloads_lifetime || 0) : (cachedPkg.downloads_lifetime_real || 0);
+    perMonthReal = cachedIsReal ? (cachedPkg.downloads_per_month || 0) : (cachedPkg.downloads_per_month_real || 0);
+    lastDayReal = cachedIsReal ? (cachedPkg.downloads_last_day ?? cachedPkg.downloads_per_day ?? 0) : (cachedPkg.downloads_last_day_real || 0);
+    todayReal = cachedIsReal ? (cachedPkg.downloads_current_day || 0) : (cachedPkg.downloads_current_day_real || 0);
+    lifetimeWithMirrors = cachedPkg.downloads_lifetime_with_mirrors || (!cachedIsReal ? (cachedPkg.downloads_lifetime || 0) : 0);
+    perMonthWithMirrors = cachedPkg.downloads_per_month_with_mirrors || (!cachedIsReal ? (cachedPkg.downloads_per_month || 0) : 0);
+    lastDayWithMirrors = cachedPkg.downloads_last_day_with_mirrors || (!cachedIsReal ? lastDayDl : 0);
+    todayWithMirrors = cachedPkg.downloads_current_day_with_mirrors || (!cachedIsReal ? todayDl : 0);
     stale = true;
     dlSource = 'cache';
   }
@@ -296,6 +321,11 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     downloads_current_day_with_mirrors: todayWithMirrors,
     downloads_per_month_with_mirrors: perMonthWithMirrors,
     downloads_lifetime_with_mirrors: lifetimeWithMirrors,
+    downloads_lifetime_real: lifetimeReal,
+    downloads_per_month_real: perMonthReal,
+    downloads_last_day_real: lastDayReal,
+    downloads_current_day_real: todayReal,
+    headlines_real_only: realOnly,
     downloads_stale: stale,
     downloads_source: dlSource,
     downloads_error: dlError,
@@ -667,6 +697,7 @@ export function saveConfig(cfg, configPath) {
  */
 export async function computeMetrics(config, cachedData = {}, fetcher = fetchJson, options = {}) {
   const wantRuns = options.wantRuns === true;
+  const realOnly = options.realOnly === true;
   // Support both "pip" / "pypi" and "npm" / "npx" keys in config JSON
   const pypiList = config.pip || config.pypi || [];
   const npmList = config.npm || config.npx || [];
@@ -681,7 +712,7 @@ export async function computeMetrics(config, cachedData = {}, fetcher = fetchJso
     if (p && p.package) cachedNpm[p.package] = p;
   }
 
-  const pypiPromises = pypiList.map(pkg => getPyPIStats(pkg, cachedPypi[pkg], descriptions[pkg], fetcher));
+  const pypiPromises = pypiList.map(pkg => getPyPIStats(pkg, cachedPypi[pkg], descriptions[pkg], fetcher, realOnly));
   const npmPromises = npmList.map(pkg => getNPMStats(pkg, cachedNpm[pkg], descriptions[pkg], fetcher, wantRuns));
 
   const resultsPypi = await Promise.all(pypiPromises);
@@ -693,6 +724,7 @@ export async function computeMetrics(config, cachedData = {}, fetcher = fetchJso
 
   return {
     timestamp: new Date().toISOString(),
+    mirrors_included: !realOnly,
     pypi: resultsPypi,
     npm: resultsNpm,
     summary: {
@@ -782,7 +814,7 @@ export function resolveRenderWidth({ full = false, columns = null, isTTY = false
   return columns || 80;
 }
 
-export function renderTable(data, { detailed = false, runs = false, configPath = '', outputPath = '', width = null } = {}) {
+export function renderTable(data, { detailed = false, runs = false, realOnly = false, configPath = '', outputPath = '', width = null } = {}) {
   const BOLD = '\x1b[1m';
   const CYAN = '\x1b[36m';
   const GREEN = '\x1b[32m';
@@ -1000,6 +1032,9 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
   if (stale.length > 0) {
     const names = stale.map(r => r.package).join(', ');
     out += `${YELLOW}  ~ Cached download numbers (live API unavailable): ${names}${RESET}\n`;
+  }
+  if (realOnly) {
+    out += `${DIM}  headlines exclude mirror sync traffic (--real-only); default counts everything${RESET}\n`;
   }
   const pepyRows = (data.pypi || []).filter(r => r.downloads_source === 'pepy-fallback');
   if (pepyRows.length > 0) {

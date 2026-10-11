@@ -125,7 +125,7 @@ Every row records which backend served it (`downloads_source` in `--json`):
 
 | Metric | Primary | Fallback |
 |---|---|---|
-| pip downloads | [pypistats.org](https://pypistats.org) `without_mirrors` (real installs; mirror totals kept in `*_with_mirrors`) | [pepy.tech](https://pepy.tech) (live but mirrors included; flagged in the footer) |
+| pip downloads | [pypistats.org](https://pypistats.org) `with_mirrors` (everything counted; mirror-excluded series in `*_real`, `--real-only` headlining it) | [pepy.tech](https://pepy.tech) (live, mirrors included; flagged in the footer) |
 | npm downloads | [api.npmjs.org](https://api.npmjs.org) (npm's official counts endpoint — the only dataset; npm-stat, npmtrends, etc. re-serve it) | cached snapshot |
 | npm runs + rank | [jsDelivr stats API](https://www.jsdelivr.com/docs/data.jsdelivr.com) (CDN file serves, trailing 30 days) | cached snapshot |
 | Metadata | registry.npmjs.org / pypi.org | cached snapshot |

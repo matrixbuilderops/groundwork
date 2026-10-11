@@ -60,6 +60,9 @@ CONFIG MANAGEMENT:
   --list                     Print current monitored packages from JSON config
   --config <path>            Specify custom path to packages.json config file
   --no-save                  Do not save latest telemetry to local cache file
+  --real-only                Exclude mirror sync traffic from pip headlines
+                             (pypistats without_mirrors). Default counts
+                             everything, mirrors included.
   --full                     Force the full-width table (no compacting to fit
                              the terminal). Piped/redirected output is always full.
   -h, --help                 Show this help message
@@ -110,6 +113,7 @@ async function main() {
 
   let isDetailed = SCRIPT_NAME.includes('detailed') || args.includes('detailed');
   let isRuns = SCRIPT_NAME.includes('runs') || args.includes('--runs');
+  let isRealOnly = false;
   let isFull = false;
   let isJson = false;
   let noSave = false;
@@ -137,6 +141,8 @@ async function main() {
       isJson = true;
     } else if (a === '--no-save') {
       noSave = true;
+    } else if (a === '--real-only') {
+      isRealOnly = true;
     } else if (a === '--full') {
       isFull = true;
     } else if (a === '--init') {
@@ -278,7 +284,7 @@ async function main() {
   }
 
   // Compute metrics
-  const data = await computeMetrics(config, cachedData, undefined, { wantRuns: isRuns });
+  const data = await computeMetrics(config, cachedData, undefined, { wantRuns: isRuns, realOnly: isRealOnly });
 
   // Cache to disk unless --no-save
   let savedCachePath = localCacheFile;
@@ -303,6 +309,7 @@ async function main() {
     process.stdout.write(renderTable(data, {
       detailed: isDetailed,
       runs: isRuns,
+      realOnly: isRealOnly,
       configPath,
       outputPath: !noSave ? savedCachePath : '',
       width

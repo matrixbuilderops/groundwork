@@ -36,8 +36,9 @@ describe('cli --no-save fixture run', () => {
       assert.equal(row.downloads_stale, true);
       assert.ok(row.downloads_error || row.meta_error, 'expected a recorded error');
     }
-    assert.equal(data.pypi[0].downloads_lifetime, 700);
+    assert.equal(data.pypi[0].downloads_lifetime, 7000);
     assert.equal(data.pypi[0].downloads_lifetime_with_mirrors, 7000);
+    assert.equal(data.pypi[0].downloads_lifetime_real, 700);
     assert.equal(data.npm[0].downloads_lifetime, 500);
 
     // --no-save: cache file untouched.
