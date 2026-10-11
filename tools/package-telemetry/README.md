@@ -109,7 +109,15 @@ npx package-telemetry --list
 ```bash
 npm test
 ```
-Zero-dependency suite on the built-in `node:test` runner: `calcGroup` units, PyPI mirror-split and npm last-day units (stubbed fetcher, no network), `fetchJson` retry semantics (stubbed `fetch`), config error handling, and a `--no-save` fixture CLI run.
+Zero-dependency suite on the built-in `node:test` runner: `calcGroup` units, pip headline/`--real-only` contract and npm last-day units (stubbed fetcher, no network), `fetchJson` retry semantics (stubbed `fetch`), pepy fallback chain, responsive widths, history record/prune/trend units, config error handling, and a `--no-save` fixture CLI run.
+
+### Growth History (`--trend`)
+
+Every saved run appends a lean snapshot to `package_telemetry_history.jsonl`
+next to the cache (stale runs are never recorded; the file keeps the last
+2,000 snapshots). `--trend` renders lifetime + 7/30-day deltas per package,
+comparing only snapshots from the same mirror mode. `--no-save` skips
+recording; `--trend --json` dumps the raw deltas.
 
 ### Responsive Tables
 

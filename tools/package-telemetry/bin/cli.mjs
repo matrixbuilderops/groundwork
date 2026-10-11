@@ -9,7 +9,11 @@ import {
   saveConfig,
   computeMetrics,
   renderTable,
-  resolveRenderWidth
+  resolveRenderWidth,
+  appendHistory,
+  loadHistory,
+  computeTrend,
+  renderTrend
 } from '../src/telemetry.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -60,6 +64,10 @@ CONFIG MANAGEMENT:
   --list                     Print current monitored packages from JSON config
   --config <path>            Specify custom path to packages.json config file
   --no-save                  Do not save latest telemetry to local cache file
+                             (also skips recording a history snapshot)
+  --trend                    Show growth table (lifetime + 7/30-day deltas)
+                             instead of the main table. Snapshots record on
+                             every saved run; --trend --json dumps raw deltas.
   --real-only                Exclude mirror sync traffic from pip headlines
                              (pypistats without_mirrors). Default counts
                              everything, mirrors included.
@@ -113,6 +121,7 @@ async function main() {
 
   let isDetailed = SCRIPT_NAME.includes('detailed') || args.includes('detailed');
   let isRuns = SCRIPT_NAME.includes('runs') || args.includes('--runs');
+  let isTrend = false;
   let isRealOnly = false;
   let isFull = false;
   let isJson = false;
@@ -143,6 +152,8 @@ async function main() {
       noSave = true;
     } else if (a === '--real-only') {
       isRealOnly = true;
+    } else if (a === '--trend') {
+      isTrend = true;
     } else if (a === '--full') {
       isFull = true;
     } else if (a === '--init') {
@@ -302,8 +313,21 @@ async function main() {
     }
   }
 
+  const historyPath = path.join(path.dirname(savedCachePath), 'package_telemetry_history.jsonl');
+  if (!noSave) {
+    appendHistory(data, historyPath);
+  }
+
   if (isJson) {
-    console.log(JSON.stringify(data, null, 2));
+    if (isTrend) {
+      const liveMap = {};
+      for (const r of [...(data.pypi || []), ...(data.npm || [])]) liveMap[r.package] = r.downloads_lifetime || 0;
+      console.log(JSON.stringify(computeTrend(loadHistory(historyPath), liveMap, { realOnly: isRealOnly }), null, 2));
+    } else {
+      console.log(JSON.stringify(data, null, 2));
+    }
+  } else if (isTrend) {
+    process.stdout.write(renderTrend(data, loadHistory(historyPath), { realOnly: isRealOnly }));
   } else {
     const width = resolveRenderWidth({ full: isFull, columns: process.stdout.columns, isTTY: process.stdout.isTTY });
     process.stdout.write(renderTable(data, {

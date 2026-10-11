@@ -736,6 +736,156 @@ export async function computeMetrics(config, cachedData = {}, fetcher = fetchJso
 }
 
 /**
+ * Append one lean snapshot line to the history JSONL. Refuses to record when
+ * any row is stale (replaying cached numbers would fake plateaus in growth
+ * charts) and prunes past `cap` snapshots. Never throws — returns success.
+ */
+export function appendHistory(data, historyPath, cap = 2000) {
+  try {
+    const rows = [...(data.pypi || []), ...(data.npm || [])];
+    if (rows.some(r => r.downloads_stale)) return false;
+    const packages = {};
+    for (const r of rows) {
+      packages[r.package] = {
+        life: r.downloads_lifetime || 0,
+        month: r.downloads_per_month || 0,
+        last: r.downloads_last_day ?? r.downloads_per_day ?? 0,
+        today: r.downloads_current_day || 0,
+        runs30: r.runs_30d ?? null,
+        rank: r.runs_rank ?? null
+      };
+    }
+    const line = JSON.stringify({
+      ts: data.timestamp || new Date().toISOString(),
+      mirrors_included: data.mirrors_included !== false,
+      sources_mixed: (data.pypi || []).some(r => r.downloads_source === 'pepy-fallback'),
+      packages,
+      totals: {
+        life: data.summary?.all?.total_lifetime || 0,
+        month: data.summary?.all?.total_month || 0
+      }
+    }) + '\n';
+    fs.appendFileSync(historyPath, line, 'utf8');
+    const lines = fs.readFileSync(historyPath, 'utf8').split('\n').filter(l => l.trim() !== '');
+    if (lines.length > cap) {
+      fs.writeFileSync(historyPath, lines.slice(-cap).join('\n') + '\n', 'utf8');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load history snapshots, skipping corrupt lines. Missing file = [].
+ */
+export function loadHistory(historyPath) {
+  try {
+    if (!fs.existsSync(historyPath)) return [];
+    const out = [];
+    for (const line of fs.readFileSync(historyPath, 'utf8').split('\n')) {
+      if (line.trim() === '') continue;
+      try {
+        const h = JSON.parse(line);
+        if (h && typeof h.ts === 'string' && h.packages && typeof h.packages === 'object') {
+          out.push(h);
+        }
+      } catch {
+        // skip corrupt line
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Lifetime deltas vs the snapshot nearest each window boundary, filtered to
+ * the current mirror mode (never compare across modes). Ties prefer the more
+ * recent snapshot (conservative delta, fresher reference).
+ */
+export function computeTrend(history, liveMap, { realOnly = false, now = Date.now() } = {}) {
+  const wantMirrors = !realOnly;
+  const matching = (history || []).filter(h => (h.mirrors_included !== false) === wantMirrors);
+  const refFor = (days) => {
+    if (matching.length === 0) return null;
+    const target = now - days * 86400000;
+    let best = matching[0];
+    let bestGap = Math.abs(Date.parse(best.ts) - target);
+    for (const h of matching) {
+      const gap = Math.abs(Date.parse(h.ts) - target);
+      if (gap < bestGap || (gap === bestGap && Date.parse(h.ts) > Date.parse(best.ts))) {
+        best = h;
+        bestGap = gap;
+      }
+    }
+    return best;
+  };
+  const ref7 = refFor(7);
+  const ref30 = refFor(30);
+  const rows = Object.entries(liveMap).map(([pkg, life]) => ({
+    package: pkg,
+    now: life,
+    d7: ref7 ? life - (ref7.packages[pkg]?.life ?? 0) : null,
+    d30: ref30 ? life - (ref30.packages[pkg]?.life ?? 0) : null
+  }));
+  return {
+    rows,
+    count: matching.length,
+    oldestTs: matching.length > 0 ? matching[0].ts : null
+  };
+}
+
+/**
+ * Render the growth table: lifetime now + 7/30-day deltas.
+ */
+export function renderTrend(data, history, { realOnly = false } = {}) {
+  const BOLD = '\x1b[1m';
+  const CYAN = '\x1b[36m';
+  const GREEN = '\x1b[32m';
+  const DIM = '\x1b[2m';
+  const RESET = '\x1b[0m';
+  const liveRows = [...(data.pypi || []), ...(data.npm || [])];
+  const liveMap = {};
+  for (const r of liveRows) liveMap[r.package] = r.downloads_lifetime || 0;
+  const trend = computeTrend(history, liveMap, { realOnly });
+  if (trend.count === 0) {
+    return `\n${DIM}  No history yet — run without --no-save to start recording snapshots.${RESET}\n\n`;
+  }
+  const fmtDelta = (d) => {
+    if (d == null) return 'n/a';
+    if (d > 0) return `${GREEN}+${d.toLocaleString()}${RESET}`;
+    if (d < 0) return `${DIM}${d.toLocaleString()}${RESET}`;
+    return `${DIM}0${RESET}`;
+  };
+  const stripLen = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').length;
+  const headers = ['Package', 'Lifetime', '7d Δ', '30d Δ'];
+  const widths = [18, 12, 10, 10];
+  const W = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1);
+  const border = '='.repeat(W);
+  const sep = '─'.repeat(W);
+  const padCell = (text, w, right) => {
+    const raw = stripLen(text);
+    const pad = ' '.repeat(Math.max(0, w - raw));
+    return right ? pad + text : text + pad;
+  };
+  let out = '';
+  out += `\n${BOLD}${CYAN}${border}${RESET}\n`;
+  out += `${BOLD}${'GROWTH TREND — LIFETIME DELTAS'.padStart((W + 29) / 2).padEnd(W)}${RESET}\n`;
+  out += `${BOLD}${CYAN}${border}${RESET}\n`;
+  out += `${BOLD}${padCell(headers[0], widths[0])} │ ${padCell(headers[1], widths[1], true)} │ ${padCell(headers[2], widths[2], true)} │ ${padCell(headers[3], widths[3], true)}${RESET}\n`;
+  out += `${DIM}${sep}${RESET}\n`;
+  for (const t of trend.rows) {
+    out += `${CYAN}${padCell(t.package, widths[0])}${RESET} │ ${padCell(t.now.toLocaleString(), widths[1], true)} │ ${padCell(fmtDelta(t.d7), widths[2], true)} │ ${padCell(fmtDelta(t.d30), widths[3], true)}\n`;
+  }
+  out += `${DIM}${sep}${RESET}\n`;
+  const oldest = trend.oldestTs ? trend.oldestTs.slice(0, 10) : 'N/A';
+  out += `${DIM}  oldest snapshot: ${oldest} │ snapshots: ${trend.count}${realOnly ? ' │ real-only' : ''}${RESET}\n\n`;
+  return out;
+}
+
+/**
  * Word wrap helper for clean terminal tables
  */
 function wordWrap(str, width) {
