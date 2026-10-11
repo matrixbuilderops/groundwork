@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import dns from 'node:dns';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,73 +13,81 @@ const HEADERS = {
   'User-Agent': 'PackageTelemetry/2.0 (+https://github.com/matrixbuilderops)'
 };
 
+let _dnsFallbackApplied = false;
+
 /**
- * Fallback DNS-over-HTTPS resolver via Cloudflare (1.1.1.1) and Google (8.8.8.8).
- * Bypasses local ISP resolver failures (SERVFAIL / ENOTFOUND / Errno 8).
+ * Fallback DNS resolvers (Cloudflare 1.1.1.1, Google 8.8.8.8) applied when the
+ * system resolver fails (SERVFAIL / ENOTFOUND / EAI_AGAIN). Uses dns.setServers
+ * so retries keep the original hostname — TLS cert/SNI validation stays intact.
  */
-async function dohResolve(hostname) {
-  for (const resolver of ['1.1.1.1', '8.8.8.8']) {
-    try {
-      const url = `https://${resolver}/dns-query?name=${encodeURIComponent(hostname)}&type=A`;
-      const res = await fetch(url, {
-        headers: { 'Accept': 'application/dns-json', ...HEADERS },
-        signal: AbortSignal.timeout(3000)
-      });
-      if (res.ok) {
-        const json = await res.json();
-        const answers = (json.Answer || []).filter(a => a.type === 1);
-        if (answers.length > 0 && answers[0].data) {
-          return answers[0].data;
-        }
-      }
-    } catch {
-      continue;
-    }
+export function applyDnsFallbackServers() {
+  if (_dnsFallbackApplied) return;
+  _dnsFallbackApplied = true;
+  try {
+    dns.setServers(['1.1.1.1', '8.8.8.8']);
+  } catch {
+    // Keep system resolvers if the swap fails.
   }
-  return null;
+}
+
+// Test-only: allow re-arming the one-shot DNS fallback between cases.
+export function __resetDnsFallbackForTests() {
+  _dnsFallbackApplied = false;
+}
+
+function isDnsError(err) {
+  if (!err) return false;
+  return err.code === 'ENOTFOUND' ||
+    err.code === 'EAI_AGAIN' ||
+    String(err.message || '').includes('getaddrinfo');
 }
 
 /**
- * Robust JSON fetcher with retry & DoH fallback.
+ * Robust JSON fetcher with retry & DNS fallback.
+ * Retries thrown network errors plus HTTP 429 / 5xx; fails fast on 404/4xx.
  */
 export async function fetchJson(url, maxRetries = 4, delayMs = 100) {
   if (delayMs > 0) {
     await new Promise(r => setTimeout(r, delayMs));
   }
-  const parsed = new URL(url);
-  const hostname = parsed.hostname;
   let lastErr = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    let targetUrl = url;
-    const reqHeaders = { ...HEADERS };
-
-    // If initial attempt hit a DNS error, try DoH direct IP resolution
-    if (attempt > 0 && lastErr && (lastErr.code === 'ENOTFOUND' || lastErr.message?.includes('getaddrinfo'))) {
-      const ip = await dohResolve(hostname);
-      if (ip) {
-        targetUrl = url.replace(`://${hostname}`, `://${ip}`);
-        reqHeaders['Host'] = hostname;
-      }
-    }
-
     try {
-      const res = await fetch(targetUrl, {
-        headers: reqHeaders,
+      const res = await fetch(url, {
+        headers: { ...HEADERS },
         signal: AbortSignal.timeout(6000)
       });
-      if (!res.ok) {
-        return { _error: `HTTP ${res.status}: ${res.statusText}` };
+      if (res.ok) {
+        return await res.json();
       }
-      return await res.json();
+      const status = res.status || 0;
+      lastErr = new Error(`HTTP ${status}: ${res.statusText}`);
+      const retryable = status === 429 || status >= 500;
+      if (!retryable || attempt >= maxRetries - 1) {
+        return { _error: lastErr.message };
+      }
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
     } catch (err) {
       lastErr = err;
-      if (attempt < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+      if (isDnsError(err)) {
+        applyDnsFallbackServers();
       }
+      if (attempt >= maxRetries - 1) break;
+      await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
     }
   }
-  return { _error: lastErr ? lastErr.message : 'Unknown network failure' };
+  return { _error: lastErr ? String(lastErr.message || lastErr) : 'Unknown network failure' };
+}
+
+/**
+ * Normalize a version string for display. Unknown versions render as bare
+ * "N/A" (never "vN/A"); known versions keep a single leading "v".
+ */
+export function formatVersion(ver) {
+  if (ver === null || ver === undefined || ver === '' || ver === 'N/A') return 'N/A';
+  const s = String(ver);
+  return s.startsWith('v') ? s : `v${s}`;
 }
 
 export function calculateDaysBetween(dateStr) {
@@ -91,11 +100,14 @@ export function calculateDaysBetween(dateStr) {
 }
 
 /**
- * Fetch PyPI stats and metadata
+ * Fetch PyPI stats and metadata.
+ * Headline download numbers use pypistats `without_mirrors` (real installs);
+ * mirror-inflated totals are reported alongside in `*_with_mirrors` fields.
  */
-export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '') {
+export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '', fetcher = fetchJson) {
   const pypiUrl = `https://pypi.org/pypi/${pkgName}/json`;
-  const pypiData = await fetchJson(pypiUrl, 3, 50);
+  const pypiData = await fetcher(pypiUrl, 3, 50);
+  const metaError = pypiData._error || null;
 
   let firstVer = 'N/A';
   let firstDate = 'N/A';
@@ -138,43 +150,64 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
 
   // Fetch daily downloads from pypistats overall API
   const statsUrl = `https://pypistats.org/api/packages/${pkgName}/overall`;
-  const statsData = await fetchJson(statsUrl, 3, 100);
+  const statsData = await fetcher(statsUrl, 3, 100);
 
   let lifetime = 0;
   let perMonth = 0;
   let lastDayDl = 0;
   let lastDayDate = 'N/A';
   let todayDl = 0;
+  let lifetimeWithMirrors = 0;
+  let perMonthWithMirrors = 0;
+  let lastDayWithMirrors = 0;
+  let todayWithMirrors = 0;
   const todayStr = new Date().toISOString().slice(0, 10);
   const daysActive = firstDate !== 'N/A' ? calculateDaysBetween(firstDate) : 1;
 
   if (!statsData._error && Array.isArray(statsData.data)) {
     const dataList = statsData.data;
-    let withMirrors = dataList.filter(d => d.category === 'with_mirrors');
-    if (withMirrors.length === 0) withMirrors = dataList;
-    withMirrors.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-
-    if (withMirrors.length > 0) {
-      lifetime = withMirrors.reduce((sum, d) => sum + (d.downloads || 0), 0);
-      const last30 = withMirrors.slice(-30);
-      perMonth = last30.reduce((sum, d) => sum + (d.downloads || 0), 0);
+    if (dataList.length > 0) {
+      const byDate = {};
+      const byDateWith = {};
+      for (const d of dataList) {
+        const dt = d.date || '';
+        if (d.category === 'without_mirrors') {
+          byDate[dt] = d.downloads || 0;
+        } else if (d.category === 'with_mirrors') {
+          byDateWith[dt] = d.downloads || 0;
+        }
+      }
+      // Headline = real installs. Fall back to mirror counts only when the
+      // API reports no without_mirrors rows at all (should not happen).
+      const primary = Object.keys(byDate).length > 0 ? byDate : byDateWith;
+      const sortedDates = Object.keys(primary).sort();
+      lifetime = Object.values(primary).reduce((s, v) => s + v, 0);
+      const last30Dates = sortedDates.slice(-30);
+      perMonth = last30Dates.reduce((s, dt) => s + primary[dt], 0);
 
       // Check if today's date exists in registry
-      const todayEntries = withMirrors.filter(d => d.date === todayStr);
-      if (todayEntries.length > 0) {
-        todayDl = todayEntries[0].downloads || 0;
-      }
+      todayDl = primary[todayStr] || 0;
 
       // Last finalized completed day (strictly before today)
-      const pastEntries = withMirrors.filter(d => (d.date || '') < todayStr);
-      if (pastEntries.length > 0) {
-        const lastEntry = pastEntries[pastEntries.length - 1];
-        lastDayDl = lastEntry.downloads || 0;
-        lastDayDate = lastEntry.date || 'N/A';
-      } else {
-        const lastEntry = withMirrors[withMirrors.length - 1];
-        lastDayDl = lastEntry.downloads || 0;
-        lastDayDate = lastEntry.date || 'N/A';
+      const pastDates = sortedDates.filter(dt => dt < todayStr);
+      if (pastDates.length > 0) {
+        lastDayDate = pastDates[pastDates.length - 1];
+        lastDayDl = primary[lastDayDate];
+      } else if (sortedDates.length > 0) {
+        lastDayDate = sortedDates[sortedDates.length - 1];
+        lastDayDl = primary[lastDayDate];
+      }
+
+      // Mirror-inflated series, reported alongside for transparency.
+      const sortedWith = Object.keys(byDateWith).sort();
+      lifetimeWithMirrors = Object.values(byDateWith).reduce((s, v) => s + v, 0);
+      perMonthWithMirrors = sortedWith.slice(-30).reduce((s, dt) => s + byDateWith[dt], 0);
+      todayWithMirrors = byDateWith[todayStr] || 0;
+      const pastWith = sortedWith.filter(dt => dt < todayStr);
+      if (pastWith.length > 0) {
+        lastDayWithMirrors = byDateWith[pastWith[pastWith.length - 1]] || 0;
+      } else if (sortedWith.length > 0) {
+        lastDayWithMirrors = byDateWith[sortedWith[sortedWith.length - 1]] || 0;
       }
     }
   }
@@ -187,6 +220,10 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     lastDayDl = cachedPkg.downloads_last_day || cachedPkg.downloads_per_day || 0;
     lastDayDate = cachedPkg.downloads_last_day_date || 'N/A';
     todayDl = cachedPkg.downloads_current_day || 0;
+    lifetimeWithMirrors = cachedPkg.downloads_lifetime_with_mirrors || 0;
+    perMonthWithMirrors = cachedPkg.downloads_per_month_with_mirrors || 0;
+    lastDayWithMirrors = cachedPkg.downloads_last_day_with_mirrors || 0;
+    todayWithMirrors = cachedPkg.downloads_current_day_with_mirrors || 0;
     stale = true;
   }
 
@@ -195,9 +232,9 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
   return {
     registry: 'PyPI (pip)',
     package: pkgName,
-    first_version: String(firstVer).startsWith('v') ? firstVer : `v${firstVer}`,
+    first_version: formatVersion(firstVer),
     first_date: firstDate,
-    current_version: String(latestVer).startsWith('v') ? latestVer : `v${latestVer}`,
+    current_version: formatVersion(latestVer),
     current_date: latestDate,
     days_live: daysActive,
     total_releases: totalReleases,
@@ -208,19 +245,64 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     downloads_per_day: lastDayDl,
     downloads_per_month: perMonth,
     downloads_lifetime: lifetime,
+    downloads_last_day_with_mirrors: lastDayWithMirrors,
+    downloads_current_day_with_mirrors: todayWithMirrors,
+    downloads_per_month_with_mirrors: perMonthWithMirrors,
+    downloads_lifetime_with_mirrors: lifetimeWithMirrors,
     downloads_stale: stale,
     downloads_error: dlError,
+    meta_error: metaError,
+    // PyPI publishes no execution counts and has no jsDelivr equivalent:
+    // runs are honestly null, rendered as n/a, never zero-filled.
+    runs_30d: null,
+    runs_window: null,
+    runs_stale: false,
+    runs_error: null,
     description: desc,
     url: `https://pypi.org/project/${pkgName}/`
   };
 }
 
 /**
+ * Fetch jsDelivr CDN hits as the "runs" proxy for an npm package. npm and
+ * PyPI publish no execution counts, so runs = CDN file serves over the
+ * trailing window jsDelivr reports (30 days). An install that is never
+ * imported scores downloads but no runs; a browser/CI-fetched file scores
+ * runs without an npm download — the two columns answer different questions.
+ */
+export async function getJsdelivrRuns(pkgName, cachedPkg = null, fetcher = fetchJson) {
+  const url = `https://data.jsdelivr.com/v1/stats/packages/npm/${pkgName}`;
+  const data = await fetcher(url, 3, 50);
+  if (!data._error && data.hits && typeof data.hits === 'object') {
+    const dates = Object.keys(data.hits.dates || {}).sort();
+    const total = typeof data.hits.total === 'number'
+      ? data.hits.total
+      : Object.values(data.hits.dates || {}).reduce((s, n) => s + (n || 0), 0);
+    return {
+      runs_30d: total,
+      runs_window: dates.length > 0 ? `${dates[0]}..${dates[dates.length - 1]}` : 'N/A',
+      runs_stale: false,
+      runs_error: null
+    };
+  }
+  if (cachedPkg && (cachedPkg.runs_30d || 0) > 0) {
+    return {
+      runs_30d: cachedPkg.runs_30d || 0,
+      runs_window: cachedPkg.runs_window || 'N/A',
+      runs_stale: true,
+      runs_error: data._error || null
+    };
+  }
+  return { runs_30d: 0, runs_window: 'N/A', runs_stale: false, runs_error: data._error || null };
+}
+
+/**
  * Fetch NPM stats and metadata
  */
-export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = '') {
+export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = '', fetcher = fetchJson, wantRuns = false) {
   const npmUrl = `https://registry.npmjs.org/${pkgName}`;
-  const npmData = await fetchJson(npmUrl, 3, 50);
+  const npmData = await fetcher(npmUrl, 3, 50);
+  const metaError = npmData._error || null;
 
   let firstVer = 'N/A';
   let firstDate = 'N/A';
@@ -231,7 +313,9 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
 
   if (!npmData._error) {
     const timeMap = npmData.time || {};
-    const versions = Object.keys(timeMap).filter(v => v !== 'created' && v !== 'modified');
+    const versions = Object.keys(timeMap)
+      .filter(v => v !== 'created' && v !== 'modified')
+      .sort((a, b) => String(timeMap[a] || '').localeCompare(String(timeMap[b] || '')));
     if (versions.length > 0) {
       firstVer = versions[0];
       firstDate = (timeMap[firstVer] || timeMap.created || 'N/A').slice(0, 10);
@@ -251,7 +335,7 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const dlUrl = `https://api.npmjs.org/downloads/range/2020-01-01:${todayStr}/${pkgName}`;
-  const dlData = await fetchJson(dlUrl, 3, 50);
+  const dlData = await fetcher(dlUrl, 3, 50);
 
   let lifetime = 0;
   let perMonth = 0;
@@ -259,6 +343,7 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
   let lastDayDate = 'N/A';
   let todayDl = 0;
   const daysActive = firstDate !== 'N/A' ? calculateDaysBetween(firstDate) : 1;
+  const pointErrors = [];
 
   if (!dlData._error && Array.isArray(dlData.downloads)) {
     let list = dlData.downloads;
@@ -277,22 +362,38 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
       // 30-day sum from range
       const last30 = list.slice(-30);
       perMonth = last30.reduce((sum, d) => sum + (d.downloads || 0), 0);
+
+      // Strict last calendar day before today (matches PyPI; zero days count).
+      const pastEntries = list.filter(d => (d.day || '') < todayStr);
+      if (pastEntries.length > 0) {
+        const lastEntry = pastEntries[pastEntries.length - 1];
+        lastDayDl = lastEntry.downloads || 0;
+        lastDayDate = lastEntry.day || 'N/A';
+      } else if (list.length > 0) {
+        const lastEntry = list[list.length - 1];
+        lastDayDl = lastEntry.downloads || 0;
+        lastDayDate = lastEntry.day || 'N/A';
+      }
+    }
+  } else {
+    // Only query point API if range query failed or was unavailable
+    const dlDayData = await fetcher(`https://api.npmjs.org/downloads/point/last-day/${pkgName}`, 2, 50);
+    if (!dlDayData._error) {
+      lastDayDl = dlDayData.downloads || 0;
+      lastDayDate = dlDayData.end || 'N/A';
+    } else {
+      pointErrors.push(`last-day: ${dlDayData._error}`);
+    }
+
+    const dlMonthData = await fetcher(`https://api.npmjs.org/downloads/point/last-month/${pkgName}`, 2, 50);
+    if (!dlMonthData._error && (dlMonthData.downloads || 0) > 0) {
+      perMonth = dlMonthData.downloads || 0;
+    } else if (dlMonthData._error) {
+      pointErrors.push(`last-month: ${dlMonthData._error}`);
     }
   }
 
-  // Fetch official last-day / last-month from npm point API
-  const dlDayData = await fetchJson(`https://api.npmjs.org/downloads/point/last-day/${pkgName}`, 3, 50);
-  if (!dlDayData._error) {
-    lastDayDl = dlDayData.downloads || 0;
-    lastDayDate = dlDayData.end || 'N/A';
-  }
-
-  const dlMonthData = await fetchJson(`https://api.npmjs.org/downloads/point/last-month/${pkgName}`, 3, 50);
-  if (!dlMonthData._error && (dlMonthData.downloads || 0) > 0) {
-    perMonth = dlMonthData.downloads || 0;
-  }
-
-  const dlError = dlData._error || null;
+  const dlError = [dlData._error, ...pointErrors].filter(Boolean).join('; ') || null;
   let stale = false;
   if (lifetime === 0 && cachedPkg && (cachedPkg.downloads_lifetime || 0) > 0) {
     lifetime = cachedPkg.downloads_lifetime || 0;
@@ -305,12 +406,23 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
 
   const desc = configuredDesc || apiDesc || (cachedPkg?.description) || '';
 
+  // Runs are fetched ONLY on request (--runs): one extra API call per
+  // package. Otherwise null — never a silent cached number.
+  let runs = { runs_30d: null, runs_window: null, runs_stale: false, runs_error: null };
+  if (wantRuns) {
+    runs = await getJsdelivrRuns(pkgName, cachedPkg, fetcher);
+  }
+
   return {
     registry: 'NPM (npx)',
     package: pkgName,
-    first_version: String(firstVer).startsWith('v') ? firstVer : `v${firstVer}`,
+    runs_30d: runs.runs_30d,
+    runs_window: runs.runs_window,
+    runs_stale: runs.runs_stale,
+    runs_error: runs.runs_error,
+    first_version: formatVersion(firstVer),
     first_date: firstDate,
-    current_version: String(latestVer).startsWith('v') ? latestVer : `v${latestVer}`,
+    current_version: formatVersion(latestVer),
     current_date: latestDate,
     days_live: daysActive,
     total_releases: totalReleases,
@@ -323,6 +435,7 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
     downloads_lifetime: lifetime,
     downloads_stale: stale,
     downloads_error: dlError,
+    meta_error: metaError,
     description: desc,
     url: `https://www.npmjs.com/package/${pkgName}`
   };
@@ -338,15 +451,18 @@ export function calcGroup(items) {
       total_last_day: 0,
       total_current_day: 0,
       total_day: 0,
+      total_runs_30d: 0,
       avg_lifetime: 0,
       avg_month: 0,
       avg_last_day: 0,
       avg_current_day: 0,
       avg_day: 0,
-      avg_days_live: 0
+      avg_days_live: 0,
+      avg_runs_30d: 0
     };
   }
   const totLife = items.reduce((s, i) => s + (i.downloads_lifetime || 0), 0);
+  const totRuns = items.reduce((s, i) => s + (i.runs_30d || 0), 0);
   const totMonth = items.reduce((s, i) => s + (i.downloads_per_month || 0), 0);
   const totLast = items.reduce((s, i) => s + (i.downloads_last_day ?? i.downloads_per_day ?? 0), 0);
   const totCur = items.reduce((s, i) => s + (i.downloads_current_day || 0), 0);
@@ -359,7 +475,9 @@ export function calcGroup(items) {
     total_last_day: totLast,
     total_current_day: totCur,
     total_day: Math.round(totLast * 10) / 10,
+    total_runs_30d: totRuns,
     avg_lifetime: Math.round((totLife / n) * 10) / 10,
+    avg_runs_30d: Math.round((totRuns / n) * 10) / 10,
     avg_month: Math.round((totMonth / n) * 10) / 10,
     avg_last_day: Math.round((totLast / n) * 10) / 10,
     avg_current_day: Math.round((totCur / n) * 10) / 10,
@@ -372,8 +490,11 @@ export function calcGroup(items) {
  * Resolve config from CLI option, cwd, user home, or package fallback.
  */
 export function resolveConfigPath(customPath = null) {
-  if (customPath && fs.existsSync(customPath)) {
-    return path.resolve(customPath);
+  if (customPath) {
+    if (fs.existsSync(customPath)) {
+      return path.resolve(customPath);
+    }
+    console.warn(`Warning: --config path not found: ${customPath}; falling back to default resolution.`);
   }
 
   // 1. Current working directory
@@ -383,9 +504,12 @@ export function resolveConfigPath(customPath = null) {
   const cwdPackagesConfig = path.join(process.cwd(), 'packages_config.json');
   if (fs.existsSync(cwdPackagesConfig)) return cwdPackagesConfig;
 
-  // 2. User home directory ~/.config/pip-npx-stats/packages.json
-  const userConfig = path.join(os.homedir(), '.config', 'pip-npx-stats', 'packages.json');
+  // 2. User home directory (current name, then legacy name)
+  const userConfig = path.join(os.homedir(), '.config', 'package-telemetry', 'packages.json');
   if (fs.existsSync(userConfig)) return userConfig;
+
+  const legacyUserConfig = path.join(os.homedir(), '.config', 'pip-npx-stats', 'packages.json');
+  if (fs.existsSync(legacyUserConfig)) return legacyUserConfig;
 
   // 3. Fallback to package bundled config
   if (fs.existsSync(DEFAULT_CONFIG_FILE)) return DEFAULT_CONFIG_FILE;
@@ -394,19 +518,43 @@ export function resolveConfigPath(customPath = null) {
 }
 
 export function loadConfig(configPath) {
-  try {
-    if (fs.existsSync(configPath)) {
-      const raw = fs.readFileSync(configPath, 'utf8');
+  if (fs.existsSync(configPath)) {
+    const raw = fs.readFileSync(configPath, 'utf8');
+    try {
       return JSON.parse(raw);
+    } catch (err) {
+      throw new Error(`Invalid JSON in config file ${configPath}: ${err.message}`);
     }
-  } catch {}
+  }
 
   return {
-    pip: ['cli-enforcement'],
-    npx: ['filelens-mcp'],
+    pip: [
+      'cli-enforcement',
+      'cli-wikia',
+      'cli-collective',
+      'cli-fleet'
+    ],
+    npx: [
+      'starforge-cli',
+      'sitemap-mcp',
+      'filelens-mcp',
+      'starreckon',
+      'verifier-mcp',
+      'sorrell-engine-mcp',
+      'package-telemetry'
+    ],
     descriptions: {
       'cli-enforcement': 'Model-agnostic hook-level behavioral enforcement engine for AI coding agents.',
-      'filelens-mcp': 'MCP server for single-call intelligent AST & structural file reading.'
+      'cli-wikia': 'Offline, pip-installable reference wiki & search index for AI CLIs (Claude, Gemini, Copilot, DeepSeek).',
+      'cli-collective': 'The Collective bundle: knowledge (cli-wikia) + control (cli-enforcement) + parallel execution (cli-fleet).',
+      'cli-fleet': 'Hardware-aware parallel Claude Code agent orchestration via shared filesystem mailboxes.',
+      'starforge-cli': 'Verification CLI auditing AI-coding telemetry with kernel-enforced no-egress proof.',
+      'sitemap-mcp': 'MCP server providing website structural awareness without HTML token explosion.',
+      'filelens-mcp': 'MCP server for single-call intelligent AST & structural file reading.',
+      'starreckon': 'Local-only developer wrapped analyzer for disk logs (Claude Code, Cowork, Codex).',
+      'verifier-mcp': 'Deterministic EU e-invoice compliance engine and paradox resolver (DevNetwork 2026).',
+      'sorrell-engine-mcp': 'Browser-native neural OS & Tiny Model Swarm runtime (OpenAI WebMCP Challenge).',
+      'package-telemetry': 'Cross-registry package telemetry engine for tracking PyPI and NPM package metrics, releases, and downloads.'
     }
   };
 }
@@ -420,9 +568,11 @@ export function saveConfig(cfg, configPath) {
 }
 
 /**
- * Compute metrics across PyPI and NPM asynchronously
+ * Compute metrics across PyPI and NPM asynchronously.
+ * `fetcher` is injectable so tests can stub the network layer.
  */
-export async function computeMetrics(config, cachedData = {}) {
+export async function computeMetrics(config, cachedData = {}, fetcher = fetchJson, options = {}) {
+  const wantRuns = options.wantRuns === true;
   // Support both "pip" / "pypi" and "npm" / "npx" keys in config JSON
   const pypiList = config.pip || config.pypi || [];
   const npmList = config.npm || config.npx || [];
@@ -437,8 +587,8 @@ export async function computeMetrics(config, cachedData = {}) {
     if (p && p.package) cachedNpm[p.package] = p;
   }
 
-  const pypiPromises = pypiList.map(pkg => getPyPIStats(pkg, cachedPypi[pkg], descriptions[pkg]));
-  const npmPromises = npmList.map(pkg => getNPMStats(pkg, cachedNpm[pkg], descriptions[pkg]));
+  const pypiPromises = pypiList.map(pkg => getPyPIStats(pkg, cachedPypi[pkg], descriptions[pkg], fetcher));
+  const npmPromises = npmList.map(pkg => getNPMStats(pkg, cachedNpm[pkg], descriptions[pkg], fetcher, wantRuns));
 
   const resultsPypi = await Promise.all(pypiPromises);
   const resultsNpm = await Promise.all(npmPromises);
@@ -485,7 +635,7 @@ function wordWrap(str, width) {
 /**
  * Render terminal table matching package-stats styling
  */
-export function renderTable(data, { detailed = false, configPath = '', outputPath = '' } = {}) {
+export function renderTable(data, { detailed = false, runs = false, configPath = '', outputPath = '' } = {}) {
   const BOLD = '\x1b[1m';
   const CYAN = '\x1b[36m';
   const GREEN = '\x1b[32m';
@@ -496,6 +646,10 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
 
   const headers = ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'Today', 'DL / Month', 'Lifetime DL'];
   const widths = [6, 17, 10, 11, 10, 11, 10, 10, 8, 12, 13];
+  if (runs) {
+    headers.push('Runs 30d');
+    widths.push(10);
+  }
   const bannerWidth = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1); // 148
   const border = '='.repeat(bannerWidth);
   const sepLine = '─'.repeat(bannerWidth);
@@ -528,6 +682,11 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
   out += `${BOLD}${formatRow(headers)}${RESET}\n`;
   out += `${DIM}${sepLine}${RESET}\n`;
 
+  const runsCell = (r) => {
+    if (r.runs_30d == null) return 'n/a';
+    return r.runs_30d.toLocaleString() + (r.runs_stale ? ' ~' : '');
+  };
+
   // PyPI Rows
   for (const r of data.pypi || []) {
     const curVal = r.downloads_current_day || 0;
@@ -547,6 +706,10 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
     ];
     const curColor = curVal === 0 ? DIM : GREEN;
     const colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, curColor, GREEN, BOLD + GREEN];
+    if (runs) {
+      cols.push(runsCell(r));
+      colors.push(DIM);
+    }
     out += `${formatRow(cols, colors)}\n`;
   }
 
@@ -571,6 +734,10 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
     ];
     const curColor = curVal === 0 ? DIM : GREEN;
     const colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW, GREEN, curColor, GREEN, BOLD + GREEN];
+    if (runs) {
+      cols.push(runsCell(r));
+      colors.push(CYAN);
+    }
     out += `${formatRow(cols, colors)}\n`;
   }
 
@@ -700,9 +867,18 @@ export function renderTable(data, { detailed = false, configPath = '', outputPat
     const names = stale.map(r => r.package).join(', ');
     out += `${YELLOW}  ~ Cached download numbers (live API unavailable): ${names}${RESET}\n`;
   }
+  const runsStale = (data.npm || []).filter(r => r.runs_stale);
+  if (runs && runsStale.length > 0) {
+    const names = runsStale.map(r => r.package).join(', ');
+    out += `${YELLOW}  ~ Cached runs numbers (jsDelivr unavailable): ${names}${RESET}\n`;
+  }
+  if (runs) {
+    out += `${DIM}  Runs 30d = jsDelivr CDN file serves, trailing 30 days (n/a: no runs source for PyPI)${RESET}\n`;
+  }
 
   const modeHint = !detailed ? '  •  Detailed mode: --detailed (or -d)' : '';
-  out += `${DIM}Config: ${configPath || 'packages.json'}${outputPath ? '  •  Output: ' + outputPath : ''}${modeHint}${RESET}\n\n`;
+  const runsHint = !runs ? '  •  Runs column: --runs' : '';
+  out += `${DIM}Config: ${configPath || 'packages.json'}${outputPath ? '  •  Output: ' + outputPath : ''}${modeHint}${runsHint}${RESET}\n\n`;
 
   return out;
 }

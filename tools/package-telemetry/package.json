@@ -1,17 +1,19 @@
 {
   "name": "package-telemetry",
-  "version": "1.0.2",
+  "version": "1.2.0",
   "description": "Cross-registry package telemetry engine for tracking PyPI and NPM package metrics, releases, and downloads.",
   "type": "module",
   "main": "./src/telemetry.mjs",
   "bin": {
-    "package-telemetry": "./bin/cli.mjs",
-    "package-telemetry-detailed": "./bin/cli.mjs"
+    "package-telemetry": "bin/cli.mjs",
+    "package-telemetry-detailed": "bin/cli.mjs",
+    "package-telemetry-runs": "bin/cli.mjs"
   },
   "files": [
     "bin",
     "src",
     "packages.json",
+    "package_telemetry_latest.json",
     "README.md",
     "LICENSE"
   ],
@@ -33,5 +35,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
   }
 }

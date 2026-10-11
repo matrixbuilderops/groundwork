@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   resolveConfigPath,
@@ -35,6 +36,11 @@ MODES:
                              of packages.json, or automatically fetched from the
                              package's live registry summary if omitted.
                              (Shortcut: run directly as \`package-telemetry-detailed\`)
+
+  --runs                      Add a "Runs 30d" column next to downloads (jsDelivr CDN
+                             file serves, trailing 30 days; n/a for PyPI which
+                             publishes no execution counts). Combines with
+                             --detailed and --json.
 
   --json                     Output calculated telemetry metrics as JSON to stdout.
 
@@ -98,6 +104,7 @@ async function main() {
   const args = process.argv.slice(2);
 
   let isDetailed = SCRIPT_NAME.includes('detailed') || args.includes('detailed');
+  let isRuns = SCRIPT_NAME.includes('runs') || args.includes('--runs');
   let isJson = false;
   let noSave = false;
   let customConfigPath = null;
@@ -118,6 +125,8 @@ async function main() {
       process.exit(0);
     } else if (a === '-d' || a === '--detailed') {
       isDetailed = true;
+    } else if (a === '--runs') {
+      isRuns = true;
     } else if (a === '--json') {
       isJson = true;
     } else if (a === '--no-save') {
@@ -242,22 +251,41 @@ async function main() {
 
   // Load cached telemetry if available for outage protection
   const cacheDir = path.dirname(configPath);
-  const cacheFile = path.join(cacheDir, 'package_telemetry_latest.json');
+  const localCacheFile = path.join(cacheDir, 'package_telemetry_latest.json');
+  const bundledCacheFile = path.join(__dirname, '..', 'package_telemetry_latest.json');
+  const userConfigDir = path.join(os.homedir(), '.config', 'package-telemetry');
+  const userCacheFile = path.join(userConfigDir, 'package_telemetry_latest.json');
+
   let cachedData = {};
-  try {
-    if (fs.existsSync(cacheFile)) {
-      cachedData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    }
-  } catch {}
+  for (const cPath of [localCacheFile, bundledCacheFile, userCacheFile]) {
+    try {
+      if (fs.existsSync(cPath)) {
+        const parsed = JSON.parse(fs.readFileSync(cPath, 'utf8'));
+        if (parsed.pypi || parsed.npm) {
+          cachedData = parsed;
+          break;
+        }
+      }
+    } catch {}
+  }
 
   // Compute metrics
-  const data = await computeMetrics(config, cachedData);
+  const data = await computeMetrics(config, cachedData, undefined, { wantRuns: isRuns });
 
   // Cache to disk unless --no-save
+  let savedCachePath = localCacheFile;
   if (!noSave) {
     try {
-      fs.writeFileSync(cacheFile, JSON.stringify(data, null, 2) + '\n', 'utf8');
-    } catch {}
+      fs.writeFileSync(localCacheFile, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    } catch {
+      try {
+        if (!fs.existsSync(userConfigDir)) {
+          fs.mkdirSync(userConfigDir, { recursive: true });
+        }
+        fs.writeFileSync(userCacheFile, JSON.stringify(data, null, 2) + '\n', 'utf8');
+        savedCachePath = userCacheFile;
+      } catch {}
+    }
   }
 
   if (isJson) {
@@ -265,8 +293,9 @@ async function main() {
   } else {
     process.stdout.write(renderTable(data, {
       detailed: isDetailed,
+      runs: isRuns,
       configPath,
-      outputPath: !noSave ? cacheFile : ''
+      outputPath: !noSave ? savedCachePath : ''
     }));
   }
 }

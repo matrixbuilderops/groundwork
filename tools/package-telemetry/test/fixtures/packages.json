@@ -1,0 +1,11 @@
+{
+  "pip": [
+    "nonexistent-pkg-xyz-12345-telemetry-test"
+  ],
+  "npx": [
+    "nonexistent-pkg-xyz-12345-telemetry-test"
+  ],
+  "descriptions": {
+    "nonexistent-pkg-xyz-12345-telemetry-test": "Bogus fixture package that cannot exist on any registry."
+  }
+}

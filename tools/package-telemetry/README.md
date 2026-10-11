@@ -19,7 +19,8 @@ npx package-telemetry --detailed
 - **Concurrent Engine:** Queries PyPI release timelines, PyPIStats ranges, NPM time maps, and NPM point/range APIs concurrently via `Promise.all`.
 - **Purely Data-Driven:** Monitored packages and descriptions are loaded dynamically from a simple `packages.json` file. Add a package to the file and the engine automatically picks it up on the next run.
 - **Live Metadata Fallback:** If a description is omitted in your JSON file, the engine automatically extracts the live summary directly from the PyPI or NPM registry API.
-- **DNS-over-HTTPS (DoH) Resilience:** Automatically falls back to Cloudflare (`1.1.1.1`) and Google (`8.8.8.8`) DoH resolvers if local ISP DNS resolvers encounter `SERVFAIL` or `ENOTFOUND`.
+- **DNS Resilience:** Automatically switches the default resolver to Cloudflare (`1.1.1.1`) and Google (`8.8.8.8`) via `dns.setServers` if local ISP DNS resolvers encounter `SERVFAIL` or `ENOTFOUND`, then retries with the original hostname (TLS/SNI intact).
+- **Honest PyPI Numbers:** Headline PyPI download counts exclude mirror traffic (`without_mirrors`); mirror-inflated totals are still reported in `*_with_mirrors` fields for transparency.
 - **Outage Protection:** Automatically caches verified telemetry so transient registry drops or upstream rate limits never zero out your numbers.
 
 ---
@@ -46,11 +47,14 @@ The configuration file is divided into `pip` and `npx` (or `npm`) arrays:
 ### Config File Lookup Order
 
 When running `npx package-telemetry`, the tool searches for your configuration file in this order:
-1. Custom path specified via `--config <path>`
+1. Custom path specified via `--config <path>` (warns and continues if missing)
 2. `./packages.json` in the current working directory
 3. `./packages_config.json` in the current working directory
 4. `~/.config/package-telemetry/packages.json` in your user home directory
-5. Bundled default `packages.json` shipped with the package
+5. `~/.config/pip-npx-stats/packages.json` (legacy path, still honored)
+6. Bundled default `packages.json` shipped with the package
+
+Corrupt JSON in an existing config file is a hard error — the tool reports it instead of silently substituting defaults.
 
 To create a starter `packages.json` in your current folder:
 ```bash
@@ -70,6 +74,11 @@ npx package-telemetry
 npx package-telemetry --detailed
 # or:
 npx package-telemetry-detailed
+
+# Runs mode (adds a "Runs 30d" column: jsDelivr CDN serves, trailing 30 days; n/a for PyPI)
+npx package-telemetry --runs
+# or:
+npx package-telemetry-runs
 
 # Output calculated metrics as raw JSON
 npx package-telemetry --json
@@ -94,6 +103,12 @@ npx package-telemetry --remove-npm <package-name>
 # List all configured packages
 npx package-telemetry --list
 ```
+
+### Run the Tests
+```bash
+npm test
+```
+Zero-dependency suite on the built-in `node:test` runner: `calcGroup` units, PyPI mirror-split and npm last-day units (stubbed fetcher, no network), `fetchJson` retry semantics (stubbed `fetch`), config error handling, and a `--no-save` fixture CLI run.
 
 ---
 
