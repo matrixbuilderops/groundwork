@@ -111,6 +111,27 @@ npm test
 ```
 Zero-dependency suite on the built-in `node:test` runner: `calcGroup` units, PyPI mirror-split and npm last-day units (stubbed fetcher, no network), `fetchJson` retry semantics (stubbed `fetch`), config error handling, and a `--no-save` fixture CLI run.
 
+### Responsive Tables
+
+On a live terminal the table compacts itself to fit your window: metadata
+columns (`First Date`, `First Rel.`, `Days Live`, `Updated`, `Current`) shed
+first, then long package names truncate with `…`. Download, runs, and rank
+columns are never dropped. Piped output stays full-width; `--full` forces the
+full table on a terminal.
+
+## Data Sources
+
+Every row records which backend served it (`downloads_source` in `--json`):
+
+| Metric | Primary | Fallback |
+|---|---|---|
+| pip downloads | [pypistats.org](https://pypistats.org) `without_mirrors` (real installs; mirror totals kept in `*_with_mirrors`) | [pepy.tech](https://pepy.tech) (live but mirrors included; flagged in the footer) |
+| npm downloads | [api.npmjs.org](https://api.npmjs.org) (npm's official counts endpoint — the only dataset; npm-stat, npmtrends, etc. re-serve it) | cached snapshot |
+| npm runs + rank | [jsDelivr stats API](https://www.jsdelivr.com/docs/data.jsdelivr.com) (CDN file serves, trailing 30 days) | cached snapshot |
+| Metadata | registry.npmjs.org / pypi.org | cached snapshot |
+
+When every live source fails, the last cached snapshot is used and marked `~`.
+
 ---
 
 ## License

@@ -100,9 +100,43 @@ export function calculateDaysBetween(dateStr) {
 }
 
 /**
+ * Fetch pip download stats from pepy.tech — fallback when pypistats is down.
+ * Same underlying PyPI logs, but mirrors INCLUDED and a shorter window, so
+ * this is strictly second choice: live but inflated. Returns null on any
+ * error or unexpected shape; callers fall through to cache.
+ */
+export async function getPepyStats(pkgName, fetcher = fetchJson) {
+  const url = `https://pepy.tech/api/v2/projects/${pkgName}`;
+  const data = await fetcher(url, 3, 100);
+  if (!data || data._error || typeof data !== 'object' ||
+      !data.downloads || typeof data.downloads !== 'object') {
+    return null;
+  }
+  const byDate = {};
+  for (const [dt, versions] of Object.entries(data.downloads)) {
+    byDate[dt] = Object.values(versions || {}).reduce((s, n) => s + (n || 0), 0);
+  }
+  const sortedDates = Object.keys(byDate).sort();
+  if (sortedDates.length === 0) return null;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const pastDates = sortedDates.filter(dt => dt < todayStr);
+  const lastDate = pastDates.length > 0 ? pastDates[pastDates.length - 1] : sortedDates[sortedDates.length - 1];
+  return {
+    lifetime: typeof data.total_downloads === 'number'
+      ? data.total_downloads
+      : Object.values(byDate).reduce((s, v) => s + v, 0),
+    perMonth: sortedDates.slice(-30).reduce((s, dt) => s + byDate[dt], 0),
+    lastDay: byDate[lastDate] || 0,
+    lastDayDate: lastDate,
+    today: byDate[todayStr] || 0
+  };
+}
+
+/**
  * Fetch PyPI stats and metadata.
  * Headline download numbers use pypistats `without_mirrors` (real installs);
  * mirror-inflated totals are reported alongside in `*_with_mirrors` fields.
+ * Source chain: pypistats -> pepy.tech fallback (mirrors included) -> cache.
  */
 export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '', fetcher = fetchJson) {
   const pypiUrl = `https://pypi.org/pypi/${pkgName}/json`;
@@ -214,6 +248,18 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
 
   const dlError = statsData._error || null;
   let stale = false;
+  let dlSource = 'pypistats';
+  if (lifetime === 0 && (statsData._error || !Array.isArray(statsData.data))) {
+    const pepy = await getPepyStats(pkgName, fetcher);
+    if (pepy && pepy.lifetime > 0) {
+      lifetime = pepy.lifetime;
+      perMonth = pepy.perMonth;
+      lastDayDl = pepy.lastDay;
+      lastDayDate = pepy.lastDayDate;
+      todayDl = pepy.today;
+      dlSource = 'pepy-fallback';
+    }
+  }
   if (lifetime === 0 && cachedPkg && (cachedPkg.downloads_lifetime || 0) > 0) {
     lifetime = cachedPkg.downloads_lifetime || 0;
     perMonth = cachedPkg.downloads_per_month || 0;
@@ -225,6 +271,7 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     lastDayWithMirrors = cachedPkg.downloads_last_day_with_mirrors || 0;
     todayWithMirrors = cachedPkg.downloads_current_day_with_mirrors || 0;
     stale = true;
+    dlSource = 'cache';
   }
 
   const desc = configuredDesc || apiDesc || (cachedPkg?.description) || '';
@@ -250,6 +297,7 @@ export async function getPyPIStats(pkgName, cachedPkg = null, configuredDesc = '
     downloads_per_month_with_mirrors: perMonthWithMirrors,
     downloads_lifetime_with_mirrors: lifetimeWithMirrors,
     downloads_stale: stale,
+    downloads_source: dlSource,
     downloads_error: dlError,
     meta_error: metaError,
     // PyPI publishes no execution counts and has no jsDelivr equivalent:
@@ -479,6 +527,7 @@ export async function getNPMStats(pkgName, cachedPkg = null, configuredDesc = ''
     downloads_per_month: perMonth,
     downloads_lifetime: lifetime,
     downloads_stale: stale,
+    downloads_source: stale ? 'cache' : 'npm-api',
     downloads_error: dlError,
     meta_error: metaError,
     description: desc,
@@ -680,7 +729,60 @@ function wordWrap(str, width) {
 /**
  * Render terminal table matching package-stats styling
  */
-export function renderTable(data, { detailed = false, runs = false, configPath = '', outputPath = '' } = {}) {
+const MAIN_COLS = [
+  { id: 'type', header: 'Type', width: 6, align: 'l', drop: 0 },
+  { id: 'pkg', header: 'Package', width: 17, align: 'l', drop: 0, shrinkMin: 12 },
+  { id: 'firstv', header: 'First Rel.', width: 10, align: 'l', drop: 2 },
+  { id: 'firstd', header: 'First Date', width: 11, align: 'l', drop: 1 },
+  { id: 'current', header: 'Current', width: 10, align: 'l', drop: 5 },
+  { id: 'updated', header: 'Updated', width: 11, align: 'l', drop: 4 },
+  { id: 'dayslive', header: 'Days Live', width: 10, align: 'r', drop: 3 },
+  { id: 'lastday', header: 'Last Day', width: 10, align: 'r', drop: 0 },
+  { id: 'rday', header: 'R-Day', width: 8, align: 'r', drop: 0, runsOnly: true },
+  { id: 'today', header: 'Today', width: 8, align: 'r', drop: 0 },
+  { id: 'rtoday', header: 'R-Today', width: 8, align: 'r', drop: 0, runsOnly: true },
+  { id: 'month', header: 'DL / Month', width: 12, align: 'r', drop: 0 },
+  { id: 'r30d', header: 'R-30d', width: 10, align: 'r', drop: 0, runsOnly: true },
+  { id: 'life', header: 'Lifetime DL', width: 13, align: 'r', drop: 0 },
+  { id: 'rlife', header: 'R-Life', width: 7, align: 'r', drop: 0, runsOnly: true },
+  { id: 'rank', header: 'CDN Rank', width: 10, align: 'r', drop: 0, runsOnly: true }
+];
+
+/**
+ * Choose visible main-table columns for a terminal width. Stat columns
+ * (downloads + runs + rank) are never dropped: only the five metadata
+ * columns shed, lowest priority first, then Package shrinks to 12 with an
+ * ellipsis. width null/undefined = full table, no dropping.
+ */
+export function pickColumns({ runs = false, width = null } = {}) {
+  let cols = MAIN_COLS.filter(c => runs || !c.runsOnly).map(c => ({ ...c }));
+  const tableWidth = (cs) => cs.reduce((s, c) => s + c.width, 0) + 3 * (cs.length - 1);
+  const dropped = [];
+  if (width == null || tableWidth(cols) <= width) {
+    return { cols, dropped, neededWidth: tableWidth(cols), fits: true };
+  }
+  const sheddable = cols.filter(c => c.drop > 0).sort((a, b) => a.drop - b.drop);
+  for (const d of sheddable) {
+    if (tableWidth(cols) <= width) break;
+    cols = cols.filter(c => c !== d);
+    dropped.push(d.header);
+  }
+  const pkg = cols.find(c => c.id === 'pkg');
+  while (tableWidth(cols) > width && pkg.width > pkg.shrinkMin) pkg.width -= 1;
+  const neededWidth = tableWidth(cols);
+  return { cols, dropped, neededWidth, fits: neededWidth <= width };
+}
+
+/**
+ * Decide the render width: --full and non-TTY output (pipes, redirects,
+ * tests) always render the full table; a live terminal renders to its width.
+ */
+export function resolveRenderWidth({ full = false, columns = null, isTTY = false } = {}) {
+  if (full || !isTTY) return null;
+  return columns || 80;
+}
+
+export function renderTable(data, { detailed = false, runs = false, configPath = '', outputPath = '', width = null } = {}) {
   const BOLD = '\x1b[1m';
   const CYAN = '\x1b[36m';
   const GREEN = '\x1b[32m';
@@ -689,23 +791,20 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
   const RESET = '\x1b[0m';
   const DIM = '\x1b[2m';
 
-  // Runs mode pairs every download column with its runs partner; rank closes the row.
-  const headers = runs
-    ? ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'R-Day', 'Today', 'R-Today', 'DL / Month', 'R-30d', 'Lifetime DL', 'R-Life', 'CDN Rank']
-    : ['Type', 'Package', 'First Rel.', 'First Date', 'Current', 'Updated', 'Days Live', 'Last Day', 'Today', 'DL / Month', 'Lifetime DL'];
-  const widths = runs
-    ? [6, 17, 10, 11, 10, 11, 10, 10, 8, 8, 8, 12, 10, 13, 7, 10]
-    : [6, 17, 10, 11, 10, 11, 10, 10, 8, 12, 13];
-  const bannerWidth = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1); // 148
+  const layout = pickColumns({ runs, width });
+  const cols = layout.cols;
+  const headers = cols.map(c => c.header);
+  const widths = cols.map(c => c.width);
+  const bannerWidth = widths.reduce((a, b) => a + b, 0) + 3 * (widths.length - 1);
   const border = '='.repeat(bannerWidth);
   const sepLine = '─'.repeat(bannerWidth);
 
-  function formatRow(cols, colors = [], isBold = false) {
+  function formatRow(values, colors = [], isBold = false) {
     const res = [];
-    for (let i = 0; i < cols.length; i++) {
-      const val = String(cols[i]);
+    for (let i = 0; i < values.length; i++) {
+      const val = String(values[i]);
       const w = widths[i];
-      const formatted = i >= 6 ? val.padStart(w) : val.padEnd(w);
+      const formatted = cols[i].align === 'r' ? val.padStart(w) : val.padEnd(w);
       const c = colors[i] || '';
       const b = isBold ? BOLD : '';
       res.push(`${b}${c}${formatted}${RESET}`);
@@ -746,76 +845,48 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
     return compactRank(r.runs_rank) + trend + (r.runs_stale ? ' ~' : '');
   };
 
-  // PyPI Rows
-  for (const r of data.pypi || []) {
+  const pkgW = cols.find(c => c.id === 'pkg').width;
+  const fitPkg = (name) => (pkgW < 17 && name.length > pkgW) ? name.slice(0, pkgW - 1) + '…' : name;
+
+  // id -> [value, color] for one data row; visible cols decide rendering.
+  const rowCells = (r, typeName, typeColor, runsColor) => {
     const curVal = r.downloads_current_day || 0;
     const lastVal = r.downloads_last_day ?? r.downloads_per_day ?? 0;
-    const cols = [
-      'pip',
-      r.package + (r.downloads_stale ? ' ~' : ''),
-      r.first_version,
-      r.first_date,
-      r.current_version,
-      r.current_date,
-      `${r.days_live}d`
-    ];
     const curColor = curVal === 0 ? DIM : GREEN;
-    const colors = [YELLOW, CYAN, DIM, DIM, GREEN, DIM, YELLOW];
-    if (runs) {
-      cols.push(
-        lastVal.toLocaleString(), runsVal(r, 'runs_last_day'),
-        curVal.toLocaleString(), runsVal(r, 'runs_today'),
-        r.downloads_per_month.toLocaleString(), runsVal(r, 'runs_30d'),
-        r.downloads_lifetime.toLocaleString(), 'n/a', rankCell(r)
-      );
-      colors.push(GREEN, DIM, curColor, DIM, GREEN, DIM, BOLD + GREEN, DIM, DIM);
-    } else {
-      cols.push(
-        lastVal.toLocaleString(),
-        curVal.toLocaleString(),
-        r.downloads_per_month.toLocaleString(),
-        r.downloads_lifetime.toLocaleString()
-      );
-      colors.push(GREEN, curColor, GREEN, BOLD + GREEN);
-    }
-    out += `${formatRow(cols, colors)}\n`;
+    return {
+      type: [typeName, typeColor],
+      pkg: [fitPkg(r.package + (r.downloads_stale ? ' ~' : '')), CYAN],
+      firstv: [r.first_version, DIM],
+      firstd: [r.first_date, DIM],
+      current: [r.current_version, GREEN],
+      updated: [r.current_date, DIM],
+      dayslive: [`${r.days_live}d`, YELLOW],
+      lastday: [lastVal.toLocaleString(), GREEN],
+      rday: [runsVal(r, 'runs_last_day'), runsColor],
+      today: [curVal.toLocaleString(), curColor],
+      rtoday: [runsVal(r, 'runs_today'), runsColor],
+      month: [r.downloads_per_month.toLocaleString(), GREEN],
+      r30d: [runsVal(r, 'runs_30d'), runsColor],
+      life: [r.downloads_lifetime.toLocaleString(), BOLD + GREEN],
+      rlife: ['n/a', DIM],
+      rank: [rankCell(r), runsColor]
+    };
+  };
+  const emitRow = (r, typeName, typeColor, runsColor) => {
+    const cells = rowCells(r, typeName, typeColor, runsColor);
+    out += `${formatRow(cols.map(c => cells[c.id][0]), cols.map(c => cells[c.id][1]))}\n`;
+  };
+
+  // PyPI Rows
+  for (const r of data.pypi || []) {
+    emitRow(r, 'pip', YELLOW, DIM);
   }
 
   out += `${DIM}${sepLine}${RESET}\n`;
 
   // NPM Rows
   for (const r of data.npm || []) {
-    const curVal = r.downloads_current_day || 0;
-    const lastVal = r.downloads_last_day ?? r.downloads_per_day ?? 0;
-    const cols = [
-      'npx',
-      r.package + (r.downloads_stale ? ' ~' : ''),
-      r.first_version,
-      r.first_date,
-      r.current_version,
-      r.current_date,
-      `${r.days_live}d`
-    ];
-    const curColor = curVal === 0 ? DIM : GREEN;
-    const colors = [MAGENTA, CYAN, DIM, DIM, GREEN, DIM, YELLOW];
-    if (runs) {
-      cols.push(
-        lastVal.toLocaleString(), runsVal(r, 'runs_last_day'),
-        curVal.toLocaleString(), runsVal(r, 'runs_today'),
-        r.downloads_per_month.toLocaleString(), runsVal(r, 'runs_30d'),
-        r.downloads_lifetime.toLocaleString(), 'n/a', rankCell(r)
-      );
-      colors.push(GREEN, CYAN, curColor, CYAN, GREEN, CYAN, BOLD + GREEN, DIM, CYAN);
-    } else {
-      cols.push(
-        lastVal.toLocaleString(),
-        curVal.toLocaleString(),
-        r.downloads_per_month.toLocaleString(),
-        r.downloads_lifetime.toLocaleString()
-      );
-      colors.push(GREEN, curColor, GREEN, BOLD + GREEN);
-    }
-    out += `${formatRow(cols, colors)}\n`;
+    emitRow(r, 'npx', MAGENTA, CYAN);
   }
 
   // Summary Table
@@ -827,8 +898,23 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
   const nSum = data.summary.npm;
   const aSum = data.summary.all;
 
-  const sumHeaders = ['Category', 'Packages', 'Avg Days Live', 'Avg Last Day', 'Avg Today', 'Avg DL / Month', 'Avg Lifetime / Pkg', 'Total Lifetime DL'];
-  const sumWidths = [16, 10, 14, 14, 12, 16, 20, 25];
+  const compactSum = layout.dropped.length > 0;
+  const sumHeaders = compactSum
+    ? ['Category', 'Pkgs', 'Avg Days', 'Avg Day', 'Avg / Mo', 'Avg / Pkg', 'Total DL']
+    : ['Category', 'Packages', 'Avg Days Live', 'Avg Last Day', 'Avg Today', 'Avg DL / Month', 'Avg Lifetime / Pkg', 'Total Lifetime DL'];
+  const sumWidths = compactSum ? [8, 4, 8, 8, 10, 10, 12] : [16, 10, 14, 14, 12, 16, 20, 25];
+
+  const oneDec = (v) => v.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  // Full branch preserves legacy output exactly; compact drops suffixes, long
+  // labels, and Avg Now (today's partial counts, near-zero by definition).
+  const sumCells = (cat, s) => {
+    const last = s.avg_last_day ?? s.avg_day ?? 0;
+    const cur = s.avg_current_day ?? 0;
+    if (compactSum) {
+      return [cat.short, `${s.count}`, oneDec(s.avg_days_live), oneDec(last), oneDec(s.avg_month), oneDec(s.avg_lifetime), s.total_lifetime.toLocaleString()];
+    }
+    return [cat.full, `${s.count} pkgs`, `${s.avg_days_live}d`, `${oneDec(last)} / day`, `${oneDec(cur)} / day`, `${oneDec(s.avg_month)} / mo`, `${oneDec(s.avg_lifetime)} / pkg`, s.total_lifetime.toLocaleString()];
+  };
 
   function formatSumRow(cols, colors = [], isBold = false) {
     const res = [];
@@ -847,46 +933,17 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
   out += `${BOLD}${formatSumRow(sumHeaders)}${RESET}\n`;
   out += `${DIM}${sumSep}${RESET}\n`;
 
-  const pLast = pSum.avg_last_day ?? pSum.avg_day ?? 0;
+  const sumColors = (arr) => compactSum ? arr.filter((_, i) => i !== 4) : arr;
   const pCur = pSum.avg_current_day ?? 0;
-  out += `${formatSumRow([
-    'PyPI (pip)',
-    `${pSum.count} pkgs`,
-    `${pSum.avg_days_live}d`,
-    `${pLast.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
-    `${pCur.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
-    `${pSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / mo`,
-    `${pSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / pkg`,
-    pSum.total_lifetime.toLocaleString()
-  ], [YELLOW, DIM, YELLOW, GREEN, pCur === 0 ? DIM : GREEN, GREEN, CYAN, BOLD + GREEN])}\n`;
+  out += `${formatSumRow(sumCells({ full: 'PyPI (pip)', short: 'pip' }, pSum), sumColors([YELLOW, DIM, YELLOW, GREEN, pCur === 0 ? DIM : GREEN, GREEN, CYAN, BOLD + GREEN]))}\n`;
 
-  const nLast = nSum.avg_last_day ?? nSum.avg_day ?? 0;
   const nCur = nSum.avg_current_day ?? 0;
-  out += `${formatSumRow([
-    'NPM (npx)',
-    `${nSum.count} pkgs`,
-    `${nSum.avg_days_live}d`,
-    `${nLast.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
-    `${nCur.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
-    `${nSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / mo`,
-    `${nSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / pkg`,
-    nSum.total_lifetime.toLocaleString()
-  ], [MAGENTA, DIM, YELLOW, GREEN, nCur === 0 ? DIM : GREEN, GREEN, CYAN, BOLD + GREEN])}\n`;
+  out += `${formatSumRow(sumCells({ full: 'NPM (npx)', short: 'npx' }, nSum), sumColors([MAGENTA, DIM, YELLOW, GREEN, nCur === 0 ? DIM : GREEN, GREEN, CYAN, BOLD + GREEN]))}\n`;
 
   out += `${DIM}${sumSep}${RESET}\n`;
 
-  const aLast = aSum.avg_last_day ?? aSum.avg_day ?? 0;
   const aCur = aSum.avg_current_day ?? 0;
-  out += `${formatSumRow([
-    'ALL ECOSYSTEM',
-    `${aSum.count} pkgs`,
-    `${aSum.avg_days_live}d`,
-    `${aLast.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
-    `${aCur.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / day`,
-    `${aSum.avg_month.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / mo`,
-    `${aSum.avg_lifetime.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} / pkg`,
-    aSum.total_lifetime.toLocaleString()
-  ], [BOLD + CYAN, BOLD, BOLD + YELLOW, BOLD + GREEN, aCur === 0 ? BOLD + DIM : BOLD + GREEN, BOLD + GREEN, BOLD + CYAN, BOLD + GREEN], true)}\n`;
+  out += `${formatSumRow(sumCells({ full: 'ALL ECOSYSTEM', short: 'ALL' }, aSum), sumColors([BOLD + CYAN, BOLD, BOLD + YELLOW, BOLD + GREEN, aCur === 0 ? BOLD + DIM : BOLD + GREEN, BOLD + GREEN, BOLD + CYAN, BOLD + GREEN]), true)}\n`;
 
   out += `${BOLD}${CYAN}${border}${RESET}\n`;
 
@@ -944,6 +1001,11 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
     const names = stale.map(r => r.package).join(', ');
     out += `${YELLOW}  ~ Cached download numbers (live API unavailable): ${names}${RESET}\n`;
   }
+  const pepyRows = (data.pypi || []).filter(r => r.downloads_source === 'pepy-fallback');
+  if (pepyRows.length > 0) {
+    const names = pepyRows.map(r => r.package).join(', ');
+    out += `${YELLOW}  ~ pepy.tech fallback (mirrors included, pypistats was down): ${names}${RESET}\n`;
+  }
   const runsStale = (data.npm || []).filter(r => r.runs_stale);
   if (runs && runsStale.length > 0) {
     const names = runsStale.map(r => r.package).join(', ');
@@ -957,9 +1019,27 @@ export function renderTable(data, { detailed = false, runs = false, configPath =
     out += `${DIM}  R-Life = n/a: jsDelivr retains 30 days only, lifetime runs unknowable │ CDN Rank = rank by hits, ▲/▼ vs prior 30d │ n/a on pip: no runs source for PyPI${RESET}\n`;
   }
 
-  const modeHint = !detailed ? '  •  Detailed mode: --detailed (or -d)' : '';
-  const runsHint = !runs ? '  •  Runs columns: --runs' : '';
-  out += `${DIM}Config: ${configPath || 'packages.json'}${outputPath ? '  •  Output: ' + outputPath : ''}${modeHint}${runsHint}${RESET}\n\n`;
+  if (layout.dropped.length > 0) {
+    let hid = `${layout.dropped.length} cols: ${layout.dropped.join(', ')}`;
+    if (width != null && hid.length + 42 > width) {
+      hid = `${layout.dropped.length} cols (${layout.dropped[0]}, …)`;
+    }
+    out += `${DIM}  compact: hid ${hid} (widen terminal or --full)${RESET}\n`;
+  }
+  if (width != null && !layout.fits) {
+    out += `${DIM}  table needs ${layout.neededWidth} cols, terminal is ${width} — widen to fit${RESET}\n`;
+  }
+
+  if (compactSum && width != null) {
+    const parts = [`Config: ${configPath ? path.basename(configPath) : 'packages.json'}`];
+    if (!detailed) parts.push('--detailed');
+    if (!runs) parts.push('--runs');
+    out += `${DIM}${parts.join('  •  ')}${RESET}\n\n`;
+  } else {
+    const modeHint = !detailed ? '  •  Detailed mode: --detailed (or -d)' : '';
+    const runsHint = !runs ? '  •  Runs columns: --runs' : '';
+    out += `${DIM}Config: ${configPath || 'packages.json'}${outputPath ? '  •  Output: ' + outputPath : ''}${modeHint}${runsHint}${RESET}\n\n`;
+  }
 
   return out;
 }

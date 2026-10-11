@@ -8,7 +8,8 @@ import {
   loadConfig,
   saveConfig,
   computeMetrics,
-  renderTable
+  renderTable,
+  resolveRenderWidth
 } from '../src/telemetry.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -59,6 +60,8 @@ CONFIG MANAGEMENT:
   --list                     Print current monitored packages from JSON config
   --config <path>            Specify custom path to packages.json config file
   --no-save                  Do not save latest telemetry to local cache file
+  --full                     Force the full-width table (no compacting to fit
+                             the terminal). Piped/redirected output is always full.
   -h, --help                 Show this help message
 
 CONFIGURATION FILE (packages.json):
@@ -107,6 +110,7 @@ async function main() {
 
   let isDetailed = SCRIPT_NAME.includes('detailed') || args.includes('detailed');
   let isRuns = SCRIPT_NAME.includes('runs') || args.includes('--runs');
+  let isFull = false;
   let isJson = false;
   let noSave = false;
   let customConfigPath = null;
@@ -133,6 +137,8 @@ async function main() {
       isJson = true;
     } else if (a === '--no-save') {
       noSave = true;
+    } else if (a === '--full') {
+      isFull = true;
     } else if (a === '--init') {
       isInit = true;
     } else if (a === '--list') {
@@ -293,11 +299,13 @@ async function main() {
   if (isJson) {
     console.log(JSON.stringify(data, null, 2));
   } else {
+    const width = resolveRenderWidth({ full: isFull, columns: process.stdout.columns, isTTY: process.stdout.isTTY });
     process.stdout.write(renderTable(data, {
       detailed: isDetailed,
       runs: isRuns,
       configPath,
-      outputPath: !noSave ? savedCachePath : ''
+      outputPath: !noSave ? savedCachePath : '',
+      width
     }));
   }
 }
