@@ -15,5 +15,11 @@
 # This file is repo-side only: it is NOT shipped in the npm tarball (see the
 # "files" allowlist in package.json). Run it from a groundwork clone.
 set -eu
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Resolve symlinks so this works when linked from ~/.local/bin or elsewhere.
+SELF="$0"
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED=$(readlink -f -- "$SELF" 2>/dev/null || true)
+  [ -n "$RESOLVED" ] && SELF="$RESOLVED"
+fi
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
 exec node "$DIR/bin/cli.mjs" "$@"
