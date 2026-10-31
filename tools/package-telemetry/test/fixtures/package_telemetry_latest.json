@@ -1,0 +1,18 @@
+{
+  "headlines_real_only": false,
+  "pypi": [
+    {
+      "package": "nonexistent-pkg-xyz-12345-telemetry-test",
+      "headlines_real_only": false,
+      "downloads_lifetime": 7000,
+      "downloads_lifetime_with_mirrors": 7000,
+      "downloads_lifetime_real": 700
+    }
+  ],
+  "npm": [
+    {
+      "package": "nonexistent-pkg-xyz-12345-telemetry-test",
+      "downloads_lifetime": 500
+    }
+  ]
+}
